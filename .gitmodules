@@ -1,0 +1,3 @@
+[submodule "mici"]
+	path = mici
+	url = https://github.com/matt-graham/mici
