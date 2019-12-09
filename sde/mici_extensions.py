@@ -1,9 +1,11 @@
+import logging
 import numpy as onp
 import scipy.linalg as osla
 import jax.numpy as np
 import jax.numpy.linalg as nla
 import jax.scipy.linalg as sla
 from jax import lax, api
+import jax.experimental.optimizers as opt
 from mici.systems import (
     EuclideanMetricSystem, cache_in_state, multi_cache_in_state)
 from mici.matrices import (
@@ -11,6 +13,8 @@ from mici.matrices import (
     DensePositiveDefiniteMatrix, )
 from mici.transitions import Transition
 from mici.states import ChainState
+from mici.solvers import maximum_norm
+from mici.errors import ConvergenceError
 from functools import partial
 
 
@@ -113,9 +117,8 @@ def standard_normal_grad_neg_log_dens(q):
 class ConditionedDiffusionConstrainedSystem(EuclideanMetricSystem):
     
     def __init__(self, obs_interval, num_steps_per_obs, num_obs_per_subseq,
-                 y_obs_seq, num_param, dim_state, dim_noise, 
-                 generate_init_state, generate_params, obs_func, step_mean, 
-                 step_sqrt_covar, metric=None, 
+                 y_obs_seq, num_param, dim_state, dim_noise, forward_op_func, 
+                 generate_init_state, generate_params, obs_func, metric=None, 
                  neg_log_input_density=standard_normal_neg_log_dens,
                  grad_neg_log_input_density=standard_normal_grad_neg_log_dens):
         
@@ -131,6 +134,8 @@ class ConditionedDiffusionConstrainedSystem(EuclideanMetricSystem):
             raise NotImplementedError(
                 'Only identity and block diagonal metrics with diagonal lower '
                 'right block currently supported.')
+            
+        self.dim_u_v0 = num_param + dim_state
 
         num_obs, dim_obs = y_obs_seq.shape
         delta = obs_interval / num_steps_per_obs
@@ -156,9 +161,8 @@ class ConditionedDiffusionConstrainedSystem(EuclideanMetricSystem):
             grad_neg_log_dens=grad_neg_log_input_density, metric=metric)
 
         def step_func(x, v, params):
-            x = (step_mean(x, delta, **params) + 
-                 step_sqrt_covar(x, delta, **params) @ v)
-            return (x, x)
+            x_n = forward_op_func(x, v, delta, **params) 
+            return (x_n, x_n)
 
         def generate_x_obs_seq(q):
             u, v_0, v_r = np.split(q, (num_param, num_param + dim_state))
@@ -262,13 +266,9 @@ class ConditionedDiffusionConstrainedSystem(EuclideanMetricSystem):
             return api.vmap(generate_final_state, (None, 0, 0))(
                 params, v_seq_blk, x_init_blk) - x_obs_seq
         
-        def norm_constr_full(q, x_obs_seq):
+        def init_objective(q, x_obs_seq, reg_coeff=1e-2):
             c = constr_full(q, x_obs_seq)
-            return (
-                0.5 * np.mean(c**2) + 0.5 * np.mean(q**2) / 50, 
-                c
-            )
-            #return np.max(np.abs(c))
+            return 0.5 * np.mean(c**2) + 0.5 * reg_coeff * np.mean(q**2), c
      
         def jacob_constr_blocks(q, x_obs_seq, partition=0):
             """Return non-zero blocks of constraint function Jacobian.
@@ -428,8 +428,8 @@ class ConditionedDiffusionConstrainedSystem(EuclideanMetricSystem):
         self._grad_log_det_sqrt_gram = api.jit(
             api.value_and_grad(log_det_sqrt_gram, has_aux=True), (2,))
         self._constr_full = api.jit(constr_full)
-        self.value_and_grad_norm_constr_full = api.jit(
-            api.value_and_grad(norm_constr_full, (0, 1), has_aux=True))
+        self.value_and_grad_init_objective= api.jit(
+            api.value_and_grad(init_objective, (0,), has_aux=True))
         self._lmult_by_jacob_constr = api.jit(lmult_by_jacob_constr)
         self._rmult_by_jacob_constr = api.jit(rmult_by_jacob_constr)
         self._lmult_by_inv_gram = api.jit(lmult_by_inv_gram)
@@ -511,16 +511,24 @@ class ConditionedDiffusionConstrainedSystem(EuclideanMetricSystem):
         mom = super().sample_momentum(state, rng)
         mom = self.project_onto_cotangent_space(mom, state)
         return mom
+
+    
+def no_u_turn_criterion(system, state_1, state_2, sum_mom):
+    return (
+        np.sum(system.dh_dmom(state_1)[:system.dim_u_v0] * 
+               sum_mom[:system.dim_u_v0]) < 0 or
+        np.sum(system.dh_dmom(state_2)[:system.dim_u_v0] * 
+               sum_mom[:system.dim_u_v0]) < 0)
         
-    def no_u_turn_criterion(self, state_1, state_2, sum_mom):
-        return (
-            np.sum(self.dh_dmom(state_1)[:self.num_param + self.dim_state] * 
-            sum_mom[:self.num_param + self.dim_state]) < 0 or
-            np.sum(self.dh_dmom(state_2)[:self.num_param + self.dim_state] * 
-            sum_mom[:self.num_param + self.dim_state]) < 0)
         
-        
-class SwitchPartitionWrapper(Transition):
+class SwitchPartitionTransitionWrapper(Transition):
+    """Markov transition that samples a base transition and switches paritition.
+    
+    The `partition` binary variable in the chain state, which sets the current
+    partition used when conditioning on values of the diffusion process at
+    intermediate time, is deterministically switched on each transition as well
+    as sampling a new state from a base transition.
+    """
     
     def __init__(self, system, base_transition):
         self.system = system
@@ -551,3 +559,77 @@ class ConditionedDiffusionHamiltonianState(ChainState):
             mom=mom, dir=dir, _call_counts=_call_counts,
             _dependencies=_dependencies, _cache=_cache)
 
+        
+def retract_onto_manifold_quasi_newton(
+        state, state_prev, dt, system, 
+        convergence_tol=1e-8, position_tol=1e-8,
+        divergence_tol=1e10, max_iters=50, norm=maximum_norm):
+    mu = onp.zeros_like(state.pos)
+    for i in range(max_iters):
+        try:
+            constr = system.constr(state)
+            error = norm(constr)
+            delta_mu = system.rmult_by_jacob_constr(
+                state_prev, system.lmult_by_inv_gram(state_prev, constr))
+            delta_pos = system.metric.inv @ delta_mu
+            if error > divergence_tol or onp.isnan(error):
+                raise ConvergenceError(
+                    f'Quasi-Newton iteration diverged. '
+                    f'Last |c|={error:.1e}, |δq|={norm(delta_pos)}.')
+            elif error < convergence_tol and norm(delta_pos) < position_tol:
+                if state.mom is not None:
+                    state.mom -= mu / dt
+                return state
+            mu += delta_mu
+            state.pos -= delta_pos
+        except ValueError as e:
+            raise ConvergenceError(
+                f'ValueError during Quasi-Newton iteration ({e}).')
+    raise ConvergenceError(
+        f'Quasi-Newton iteration did not converge. '
+        f'Last |c|={error:.1e}, |δq|={norm(delta_pos)}.')
+
+
+def get_initial_state(system, rng, generate_x_obs_seq_init, dim_q, tol, 
+                      reg_coeff=5e-2, coarse_tol=1e-1, max_iters=1000):
+
+    # Use optimizers to set optimizer initialization and update functions
+    opt_init, opt_update, get_params = opt.adam(2e-1)
+
+    # Define a compiled update step
+    @api.jit
+    def step(i, opt_state, x_obs_seq_init):
+        q, = get_params(opt_state)
+        (obj, constr), grad = system.value_and_grad_init_objective(
+            q, x_obs_seq_init, reg_coeff)
+        opt_state = opt_update(i, grad, opt_state)
+        return opt_state, obj, constr
+
+    converged = False
+    while not converged:
+        q_init = rng.standard_normal(dim_q)
+        x_obs_seq_init = generate_x_obs_seq_init(rng)
+        opt_state = opt_init((q_init,))
+        for i in range(max_iters):
+            opt_state_next, norm, constr = step(i, opt_state, x_obs_seq_init)
+            if not np.isfinite(norm):
+                logging.info('Diverged')
+                break
+            max_abs_constr = maximum_norm(constr)
+            if max_abs_constr < coarse_tol:
+                q_init, = get_params(opt_state)
+                state = ConditionedDiffusionHamiltonianState(
+                    q_init, x_obs_seq=x_obs_seq_init)
+                try:
+                    state = retract_onto_manifold_quasi_newton(
+                        state, state, 1., system, tol)
+                except ConvergenceError:
+                    logging.info('Quasi-Newton iteration diverged.')
+                if np.max(np.abs(system.constr(state))) < tol:
+                    converged = True
+                    break
+            if i % 100 == 0:
+                logging.info(f'Iteration {i: >6}: mean|constr|^2 = {norm:.3e} '
+                             f'max|constr| = {max_abs_constr:.3e}')
+            opt_state = opt_state_next
+    return state
