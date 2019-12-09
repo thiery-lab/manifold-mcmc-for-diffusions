@@ -1,0 +1,13 @@
+mathtext.fontset: cm
+font.family: Serif
+axes.titlesize: 10
+axes.labelsize: 10
+xtick.labelsize: 6
+ytick.labelsize: 6
+legend.fontsize: 10
+axes.linewidth: 0.5
+lines.linewidth: 0.75
+grid.linewidth: 0.5
+axes.labelpad: 2.
+figure.dpi: 150
+animation.html: html5
