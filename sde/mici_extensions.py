@@ -480,7 +480,7 @@ class ConditionedDiffusionHamiltonianState(ChainState):
             _dependencies=_dependencies, _cache=_cache)
 
         
-def retract_onto_manifold_quasi_newton(
+def solve_projection_onto_manifold_quasi_newton(
         state, state_prev, dt, system, 
         convergence_tol=1e-8, position_tol=1e-8,
         divergence_tol=1e10, max_iters=50, norm=maximum_norm):
