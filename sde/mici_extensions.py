@@ -167,7 +167,7 @@ class ConditionedDiffusionConstrainedSystem(EuclideanMetricSystem):
         def generate_x_obs_seq(q):
             u, v_0, v_r = np.split(q, (num_param, num_param + dim_state))
             params = generate_params(u)
-            x_init = generate_init_state(v_0)
+            x_init = generate_init_state(v_0, params)
             v_seq = np.reshape(v_r, (-1, dim_noise))
             _, x_seq = lax.scan(
                 partial(step_func, params=params), x_init, v_seq)
@@ -242,7 +242,7 @@ class ConditionedDiffusionConstrainedSystem(EuclideanMetricSystem):
             u, v_init, v_seq_flat = split(q, (num_param, dim_state,))
             v_seq = np.reshape(v_seq_flat, (-1, dim_noise))
             params = generate_params(u)
-            x_init_0 = generate_init_state(v_init)
+            x_init_0 = generate_init_state(v_init, params)
             (v_seq_0, v_seq_1, v_seq_2, x_init_1, x_init_2, 
              y_tilde_0, y_tilde_1, y_tilde_2) = partition_seq(
                  v_seq, x_obs_seq, partition)
@@ -256,12 +256,11 @@ class ConditionedDiffusionConstrainedSystem(EuclideanMetricSystem):
             return x_seq[-1]
         
         def constr_full(q, x_obs_seq):
-            """Calculate constraint function for current partition."""
             u, v_init, v_seq_flat = split(q, (num_param, dim_state,))
             v_seq_blk = np.reshape(
                 v_seq_flat, (num_obs, num_steps_per_obs, dim_noise))
             params = generate_params(u)
-            x_init_0 = generate_init_state(v_init)
+            x_init_0 = generate_init_state(v_init, params)
             x_init_blk = np.concatenate((x_init_0[None], x_obs_seq[:-1]), 0)
             return api.vmap(generate_final_state, (None, 0, 0))(
                 params, v_seq_blk, x_init_blk) - x_obs_seq
@@ -295,7 +294,7 @@ class ConditionedDiffusionConstrainedSystem(EuclideanMetricSystem):
             def gen_0(u, v):
                 params = generate_params(u)
                 v_init, v_seq_flat = split(v, (dim_state,))
-                x_init = generate_init_state(v_init)
+                x_init = generate_init_state(v_init, params)
                 return generate_obs(
                     params, np.reshape(v_seq_flat, (-1, dim_noise)), x_init)
             
