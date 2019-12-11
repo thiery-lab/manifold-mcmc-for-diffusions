@@ -1,4 +1,4 @@
-mici==0.1.2
+mici==0.1.3
 sympy>=1.4
 numpy>=1.15
 scipy>=1.1
