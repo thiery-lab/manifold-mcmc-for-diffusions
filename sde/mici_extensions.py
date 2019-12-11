@@ -9,92 +9,13 @@ import jax.experimental.optimizers as opt
 from mici.systems import (
     EuclideanMetricSystem, cache_in_state, multi_cache_in_state)
 from mici.matrices import (
-    _AbstractSquareMatrix, IdentityMatrix, PositiveDiagonalMatrix, 
+    SymmetricBlockDiagonalMatrix, IdentityMatrix, PositiveDiagonalMatrix, 
     DensePositiveDefiniteMatrix, )
 from mici.transitions import Transition
 from mici.states import ChainState
 from mici.solvers import maximum_norm
 from mici.errors import ConvergenceError
 from functools import partial
-
-
-class SquareBlockDiagonalMatrix(_AbstractSquareMatrix):
-
-    def __init__(self, *blocks):
-        sizes = tuple(block.shape[0] for block in blocks)
-        super().__init__(size=sum(sizes))
-        self._blocks = tuple(blocks)
-        self._sizes = sizes
-        self._splits = np.cumsum(sizes[:-1])
-
-    @property
-    def blocks(self):
-        return self._blocks
-
-    def _split(self, other, axis=0):
-        assert other.shape[axis] == self.shape[0]
-        return onp.split(other, self._splits, axis=axis)
-
-    def _left_matrix_multiply(self, other):
-        return onp.concatenate(
-            [block @ part for block, part in
-             zip(self._blocks, self._split(other, axis=0))], axis=0)
-
-    def _right_matrix_multiply(self, other):
-        return onp.concatenate(
-            [part @ block for block, part in
-             zip(self._blocks, self._split(other, axis=-1))], axis=-1)
-
-    def _scalar_multiply(self, scalar):
-        return type(self)(*(scalar * block for block in self._blocks))
-
-    @property
-    def T(self):
-        return SquareBlockDiagonalMatrix(*(block.T for block in self._blocks))
-
-    @property
-    def sqrt(self):
-        return SquareBlockDiagonalMatrix(
-            *(block.sqrt for block in self._blocks))
-
-    @property
-    def inv(self):
-        return type(self)(*(block.inv for block in self._blocks))
-
-    @property
-    def eigval(self):
-        return onp.concatenate([block.eigval for block in self._blocks])
-
-    @property
-    def eigvec(self):
-        return SquareBlockDiagonalMatrix(
-            *(block.eigvec for block in self._blocks))
-
-    @property
-    def array(self):
-        return sla.block_diag(self._blocks)
-
-    @property
-    def log_abs_det(self):
-        return sum(block.log_abs_det for block in self._blocks)
-
-
-class SymmetricBlockDiagonalMatrix(SquareBlockDiagonalMatrix):
-
-    def __init__(self, *blocks):
-        assert all(block is block.T for block in blocks)
-        SquareBlockDiagonalMatrix.__init__(self, *blocks)
-        self._is_posdef = all(block.is_posdef for block in blocks)
-        self._is_negdef = all(block.is_negdef for block in blocks)
-
-    @property
-    def is_posdef(self):
-        return self._is_posdef
-
-    @property
-    def is_negdef(self):
-        return self._is_negdef
-
 
 
 def split(v, lengths):
