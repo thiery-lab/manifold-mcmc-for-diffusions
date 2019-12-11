@@ -541,7 +541,7 @@ def get_initial_state(system, rng, generate_x_obs_seq_init, dim_q, tol,
                 state = ConditionedDiffusionHamiltonianState(
                     q_init, x_obs_seq=x_obs_seq_init)
                 try:
-                    state = retract_onto_manifold_quasi_newton(
+                    state = solve_projection_onto_manifold_quasi_newton(
                         state, state, 1., system, tol)
                 except ConvergenceError:
                     logging.info('Quasi-Newton iteration diverged.')
