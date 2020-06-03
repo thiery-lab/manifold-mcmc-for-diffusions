@@ -1,9 +1,10 @@
-mici==0.1.3
+mici>=0.1.5
+symnum>=0.1.0
 sympy>=1.4
 numpy>=1.15
 scipy>=1.1
-jax==0.1.55
-jaxlib==0.1.37
+jax>=0.1.55
+jaxlib>=0.1.37
 matplotlib>=3.1
 jupyter>=1.0
 arviz>=0.5

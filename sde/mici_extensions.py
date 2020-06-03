@@ -82,7 +82,7 @@ class ConditionedDiffusionConstrainedSystem(EuclideanMetricSystem):
             grad_neg_log_dens=grad_neg_log_input_density, metric=metric)
 
         def step_func(x, v, params):
-            x_n = forward_op_func(x, v, delta, **params) 
+            x_n = forward_op_func(x, v, delta, params) 
             return (x_n, x_n)
 
         def generate_x_obs_seq(q):
