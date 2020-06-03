@@ -439,35 +439,30 @@ def no_u_turn_criterion(system, state_1, state_2, sum_mom):
                sum_mom[:system.dim_u_v0]) < 0 or
         np.sum(system.dh_dmom(state_2)[:system.dim_u_v0] * 
                sum_mom[:system.dim_u_v0]) < 0)
-        
-        
-class SwitchPartitionTransitionWrapper(Transition):
-    """Markov transition that samples a base transition and switches paritition.
-    
+
+
+class SwitchPartitionTransition(Transition):
+    """Markov transition that deterministically switches conditioned partition.
+
     The `partition` binary variable in the chain state, which sets the current
     partition used when conditioning on values of the diffusion process at
     intermediate time, is deterministically switched on each transition as well
-    as sampling a new state from a base transition.
+    as updating the cached observed state sequence based on the current position
+    state component.
     """
-    
-    def __init__(self, system, base_transition):
+
+    def __init__(self, system):
         self.system = system
-        self.base_transition = base_transition
-        
-    state_variables = {'pos', 'mom', 'partition', 'x_obs_seq', 'dir'}
-    
-    @property
-    def statistic_types(self):
-        return self.base_transition.statistic_types
-        
+
+    state_variables = {'partition', 'x_obs_seq'}
+    statistic_types = None
+
     def sample(self, state, rng):
-        state_next, trans_stats = self.base_transition.sample(state, rng)
-        if state_next is not state:
-            self.system.update_x_obs_seq(state_next)
-        state_next.partition = 0 if state.partition == 1 else 1
-        return state_next, trans_stats
-        
-        
+        state.partition = 0 if state.partition == 1 else 1
+        self.system.update_x_obs_seq(state)
+        return state, None
+
+
 class ConditionedDiffusionHamiltonianState(ChainState):
     
     def __init__(self, pos, x_obs_seq, partition=0, mom=None, dir=1, 
