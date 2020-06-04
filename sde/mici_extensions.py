@@ -9,7 +9,7 @@ import jax.experimental.optimizers as opt
 from mici.systems import (
     EuclideanMetricSystem, cache_in_state, multi_cache_in_state)
 from mici.matrices import (
-    SymmetricBlockDiagonalMatrix, IdentityMatrix, PositiveDiagonalMatrix, 
+    SymmetricBlockDiagonalMatrix, IdentityMatrix, PositiveDiagonalMatrix,
     DensePositiveDefiniteMatrix, )
 from mici.transitions import Transition
 from mici.states import ChainState
@@ -36,17 +36,17 @@ def standard_normal_grad_neg_log_dens(q):
 
 
 class ConditionedDiffusionConstrainedSystem(EuclideanMetricSystem):
-    
+
     def __init__(self, obs_interval, num_steps_per_obs, num_obs_per_subseq,
-                 y_obs_seq, num_param, dim_state, dim_noise, forward_op_func, 
-                 generate_init_state, generate_params, obs_func, metric=None, 
+                 y_obs_seq, num_param, dim_state, dim_noise, forward_op_func,
+                 generate_init_state, generate_params, obs_func, metric=None,
                  neg_log_input_density=standard_normal_neg_log_dens,
                  grad_neg_log_input_density=standard_normal_grad_neg_log_dens):
-        
+
         if metric is None or isinstance(metric, IdentityMatrix):
             metric_1 = np.eye(num_param)
             log_det_sqrt_metric_1 = 0
-        elif (isinstance(metric, SymmetricBlockDiagonalMatrix) and 
+        elif (isinstance(metric, SymmetricBlockDiagonalMatrix) and
                   isinstance(metric.blocks[1], PositiveDiagonalMatrix)):
             metric_1 = metric.blocks[0].array
             log_det_sqrt_metric_1 = metric.blocks[0].log_abs_det_sqrt
@@ -55,7 +55,7 @@ class ConditionedDiffusionConstrainedSystem(EuclideanMetricSystem):
             raise NotImplementedError(
                 'Only identity and block diagonal metrics with diagonal lower '
                 'right block currently supported.')
-            
+
         self.dim_u_v0 = num_param + dim_state
 
         num_obs, dim_obs = y_obs_seq.shape
@@ -72,17 +72,17 @@ class ConditionedDiffusionConstrainedSystem(EuclideanMetricSystem):
         y_obs_seq_blk_p0 = np.reshape(
         y_obs_seq, (num_block, num_obs_per_subseq, -1))
         y_obs_seq_0_p1, y_obs_seq_1_p1, y_obs_seq_2_p1 = split(
-            y_obs_seq, (num_obs_per_subseq // 2, 
+            y_obs_seq, (num_obs_per_subseq // 2,
                         num_obs_per_subseq  * (num_block - 1),))
         y_obs_seq_1_blk_p1 = np.reshape(
             y_obs_seq_1_p1, (num_block - 1, num_obs_per_subseq, dim_obs))
-                               
+
         super().__init__(
             neg_log_dens=neg_log_input_density,
             grad_neg_log_dens=grad_neg_log_input_density, metric=metric)
 
         def step_func(x, v, params):
-            x_n = forward_op_func(x, v, delta, params) 
+            x_n = forward_op_func(x, v, delta, params)
             return (x_n, x_n)
 
         def generate_x_obs_seq(q):
@@ -106,17 +106,17 @@ class ConditionedDiffusionConstrainedSystem(EuclideanMetricSystem):
                                     num_steps_per_obs]).flatten(), x_seq[-1]])
 
         def vmapped_generate_obs(params, v_seq_blocks, x_init_blocks):
-            
+
             def func(v_seq, x_init):
                 return generate_obs(params, v_seq, x_init)
             vmapped_gen_func = api.vmap(partial(generate_obs, params))
             return vmapped_gen_func(v_seq_blocks, x_init_blocks)
-        
+
         def partition_seq(v_seq, x_obs_seq, partition=0):
             """Partition noise increment and observation sequences.
-            
-            Partitition sequences in to either 
-               0. equally sized blocks or 
+
+            Partitition sequences in to either
+               0. equally sized blocks or
                1. half-block offset equally sized blocks.
             """
             if partition == 0:
@@ -131,17 +131,17 @@ class ConditionedDiffusionConstrainedSystem(EuclideanMetricSystem):
                 y_tilde_0 = np.concatenate(
                     (y_obs_seq_blk_p0[0, :-1].flatten(), x_obs_seq_blk[0, -1]))
                 y_tilde_1 = np.concatenate(
-                    (y_obs_seq_blk_p0[1:-1, :-1].reshape((num_block - 2, -1)), 
+                    (y_obs_seq_blk_p0[1:-1, :-1].reshape((num_block - 2, -1)),
                      x_obs_seq_blk[1:-1, -1]), -1)
                 y_tilde_2 = y_obs_seq_blk_p0[-1].flatten()
             else:
                 v_seq_0, v_seq_1, v_seq_2 = split(
-                    v_seq, ((num_obs_per_subseq // 2) * num_steps_per_obs, 
+                    v_seq, ((num_obs_per_subseq // 2) * num_steps_per_obs,
                             num_step_per_block  * (num_block - 1),))
                 v_seq_1 = np.reshape(
                     v_seq_1, (num_block - 1, num_step_per_block, dim_noise))
                 x_obs_seq_0, x_obs_seq_1, x_obs_seq_2 = split(
-                    x_obs_seq, (num_obs_per_subseq // 2, 
+                    x_obs_seq, (num_obs_per_subseq // 2,
                                 num_obs_per_subseq * (num_block - 1),))
                 x_obs_seq_1_blk = np.reshape(
                     x_obs_seq_1, (num_block - 1, num_obs_per_subseq, dim_state))
@@ -151,11 +151,11 @@ class ConditionedDiffusionConstrainedSystem(EuclideanMetricSystem):
                 y_tilde_0 = np.concatenate(
                     (y_obs_seq_0_p1[:-1].flatten(), x_obs_seq_0[-1]))
                 y_tilde_1 = np.concatenate(
-                    (y_obs_seq_1_blk_p1[:, :-1].reshape((num_block - 1, -1)), 
+                    (y_obs_seq_1_blk_p1[:, :-1].reshape((num_block - 1, -1)),
                      x_obs_seq_1_blk[:, -1]), -1)
                 y_tilde_2 = y_obs_seq_2_p1.flatten()
             return (
-                v_seq_0, v_seq_1, v_seq_2, x_init_1, x_init_2, 
+                v_seq_0, v_seq_1, v_seq_2, x_init_1, x_init_2,
                 y_tilde_0, y_tilde_1, y_tilde_2)
 
         def constr(q, x_obs_seq, partition=0):
@@ -164,18 +164,18 @@ class ConditionedDiffusionConstrainedSystem(EuclideanMetricSystem):
             v_seq = np.reshape(v_seq_flat, (-1, dim_noise))
             params = generate_params(u)
             x_init_0 = generate_init_state(v_init, params)
-            (v_seq_0, v_seq_1, v_seq_2, x_init_1, x_init_2, 
+            (v_seq_0, v_seq_1, v_seq_2, x_init_1, x_init_2,
              y_tilde_0, y_tilde_1, y_tilde_2) = partition_seq(
                  v_seq, x_obs_seq, partition)
             c_0 = generate_obs(params, v_seq_0, x_init_0) - y_tilde_0
             c_1 = vmapped_generate_obs(params, v_seq_1, x_init_1) - y_tilde_1
             c_2 = generate_obs(params, v_seq_2, x_init_2, True) - y_tilde_2
             return np.concatenate([c_0, c_1.flatten(), c_2])
-        
+
         def generate_final_state(params, v_seq, x_init):
             _, x_seq = lax.scan(partial(step_func, params=params), x_init, v_seq)
             return x_seq[-1]
-        
+
         def constr_full(q, x_obs_seq):
             u, v_init, v_seq_flat = split(q, (num_param, dim_state,))
             v_seq_blk = np.reshape(
@@ -185,53 +185,53 @@ class ConditionedDiffusionConstrainedSystem(EuclideanMetricSystem):
             x_init_blk = np.concatenate((x_init_0[None], x_obs_seq[:-1]), 0)
             return api.vmap(generate_final_state, (None, 0, 0))(
                 params, v_seq_blk, x_init_blk) - x_obs_seq
-        
+
         def init_objective(q, x_obs_seq, reg_coeff=1e-2):
             c = constr_full(q, x_obs_seq)
             return 0.5 * np.mean(c**2) + 0.5 * reg_coeff * np.mean(q**2), c
-     
+
         def jacob_constr_blocks(q, x_obs_seq, partition=0):
             """Return non-zero blocks of constraint function Jacobian.
-            
+
             Input state q can be decomposed into q = (u, v0, v1, v2)
             where global latent state (parameters) are determined by u,
             initial sequence block by v0, middle sequence blocks by v1
             and final sequence block v2.
-            
+
             Similarly constraints c can be decompsed as c = (c0, c1, c2)
             where c0 is constraints on initial sequence block, c1 is the
             constraints on the middle sequence blocks and c2 is the
             constraints on the final sequence block.
-            
+
             Constraint Jacobian ∂c/∂q has block structure
-            
+
                 ∂c/∂q = ∂(c0, c1, c2)/∂(u, v0, v1, v2)
                       = ((∂c0/∂u, ∂c0/∂v0, 0,       0      )
                          (∂c1/∂u, 0,       ∂c1/∂v1, 0      )
                          (∂c2/∂u, 0,       0,       ∂c2/∂v2))
-            
+
             """
-            
+
             def gen_0(u, v):
                 params = generate_params(u)
                 v_init, v_seq_flat = split(v, (dim_state,))
                 x_init = generate_init_state(v_init, params)
                 return generate_obs(
                     params, np.reshape(v_seq_flat, (-1, dim_noise)), x_init)
-            
+
             def gen_1(u, v, x_init):
                 params = generate_params(u)
                 return generate_obs(
                     params, np.reshape(v, (-1, dim_noise)), x_init)
-            
+
             def gen_2(u, v, x_init):
                 params = generate_params(u)
                 return generate_obs(
-                    params, np.reshape(v, (-1, dim_noise)), x_init, True)                
-            
+                    params, np.reshape(v, (-1, dim_noise)), x_init, True)
+
             u, v_init, v_seq_flat = split(q, (num_param, dim_state,))
             v_seq = np.reshape(v_seq_flat, (-1, dim_noise))
-            (v_seq_0, v_seq_1, v_seq_2, x_init_1, x_init_2, 
+            (v_seq_0, v_seq_1, v_seq_2, x_init_1, x_init_2,
              y_tilde_0, y_tilde_1, y_tilde_2) = partition_seq(
                  v_seq, x_obs_seq, partition)
             v_0 = np.concatenate((v_init, v_seq_0.flatten()))
@@ -243,47 +243,47 @@ class ConditionedDiffusionConstrainedSystem(EuclideanMetricSystem):
             dc_2_du, dc_2_dv_2 = api.jacrev(gen_2, (0, 1))(u, v_2, x_init_2)
             return (
                 (dc_0_du, dc_1_du, dc_2_du),  (dc_0_dv_0, dc_1_dv_1, dc_2_dv_2))
-        
+
         def chol_gram_blocks(dc_du, dc_dv):
             """Calculate Cholesky factors of decomposition of Gram matrix. """
             if isinstance(metric, IdentityMatrix):
-                D = tuple(np.einsum('...ij,...kj', dc_dv[i], dc_dv[i]) 
-                          for i in range(3))  
+                D = tuple(np.einsum('...ij,...kj', dc_dv[i], dc_dv[i])
+                          for i in range(3))
             else:
                 m_v = list(split(
-                    metric_2_diag, (dc_dv[0].shape[1], 
+                    metric_2_diag, (dc_dv[0].shape[1],
                                     dc_dv[1].shape[0] * dc_dv[1].shape[2])))
                 m_v[1] = m_v[1].reshape((dc_dv[1].shape[0], dc_dv[1].shape[2]))
-                D = tuple(np.einsum('...ij,...kj', 
+                D = tuple(np.einsum('...ij,...kj',
                                     dc_dv[i] / m_v[i][..., None, :], dc_dv[i])
                           for i in range(3))
             chol_D = tuple(nla.cholesky(D[i]) for i in range(3))
             D_inv_dc_du = tuple(
                 sla.cho_solve((chol_D[i], True), dc_du[i]) for i in range(3))
             chol_C = nla.cholesky(
-                metric_1 + 
+                metric_1 +
                 (dc_du[0].T @ D_inv_dc_du[0] +
                  np.einsum('ijk,ijl->kl', dc_du[1], D_inv_dc_du[1]) +
                  dc_du[2].T @ D_inv_dc_du[2]))
-                
+
             return chol_C, chol_D
-            
+
 
         def log_det_sqrt_gram_from_chol(chol_C, chol_D):
             """Calculate log-det of Gram matrix from Cholesky factors."""
             return (
-                sum(np.log(np.abs(chol_D[i].diagonal(0, -2, -1))).sum() 
+                sum(np.log(np.abs(chol_D[i].diagonal(0, -2, -1))).sum()
                     for i in range(3)) +
                 np.log(np.abs(chol_C.diagonal())).sum() - log_det_sqrt_metric_1
             )
-        
-        
+
+
         def log_det_sqrt_gram(q, x_obs_seq, partition=0):
             """Calculate log-determinant of constraint Jacobian Gram matrix."""
             dc_du, dc_dv = jacob_constr_blocks(q, x_obs_seq, partition)
             chol_C, chol_D = chol_gram_blocks(dc_du, dc_dv)
             return (
-                log_det_sqrt_gram_from_chol(chol_C, chol_D), 
+                log_det_sqrt_gram_from_chol(chol_C, chol_D),
                 ((dc_du, dc_dv), (chol_C, chol_D)))
 
 
@@ -292,11 +292,11 @@ class ConditionedDiffusionConstrainedSystem(EuclideanMetricSystem):
             vct_u, vct_v = split(vct, (num_param,))
             j0, j1, j2 = dc_dv[0].shape[1], dc_dv[1].shape[0], dc_dv[2].shape[1]
             return (
-                np.vstack((dc_du[0], dc_du[1].reshape((-1, num_param)), 
+                np.vstack((dc_du[0], dc_du[1].reshape((-1, num_param)),
                            dc_du[2])) @ vct_u +
                 np.concatenate((
                     dc_dv[0] @ vct_v[:j0],
-                    np.einsum('ijk,ik->ij', dc_dv[1], 
+                    np.einsum('ijk,ik->ij', dc_dv[1],
                               np.reshape(vct_v[j0:-j2], (j1, -1))).flatten(),
                     dc_dv[2] @ vct_v[-j2:]
                 ))
@@ -305,38 +305,38 @@ class ConditionedDiffusionConstrainedSystem(EuclideanMetricSystem):
         def rmult_by_jacob_constr(dc_du, dc_dv, vct):
             """Right-multiply vector by constraint Jacobian matrix."""
             vct_0, vct_1, vct_2 = split(
-                vct, (dc_du[0].shape[0], dc_du[1].shape[0] * dc_du[1].shape[1], 
+                vct, (dc_du[0].shape[0], dc_du[1].shape[0] * dc_du[1].shape[1],
                       dc_du[2].shape[0]))
             vct_1_blocks = np.reshape(vct_1, dc_du[1].shape[:2])
             return np.concatenate([
-                dc_du[0].T @ vct_0 + 
-                np.einsum('ijk,ij->k', dc_du[1], vct_1_blocks) + 
+                dc_du[0].T @ vct_0 +
+                np.einsum('ijk,ij->k', dc_du[1], vct_1_blocks) +
                 dc_du[2].T @ vct_2,
                 dc_dv[0].T @ vct_0,
                 np.einsum('ijk,ij->ik', dc_dv[1], vct_1_blocks).flatten(),
                 dc_dv[2].T @ vct_2
             ])
-        
+
         def lmult_by_inv_gram(dc_du, dc_dv, chol_C, chol_D, vct):
             """Left-multiply vector by inverse Gram matrix."""
             vct = list(split(
-                vct, (dc_du[0].shape[0], dc_du[1].shape[0] * dc_du[1].shape[1], 
+                vct, (dc_du[0].shape[0], dc_du[1].shape[0] * dc_du[1].shape[1],
                       dc_du[2].shape[0])))
             vct[1] = np.reshape(vct[1], dc_du[1].shape[:2])
 
             D_inv_vct = tuple(
                 sla.cho_solve((chol_D[i], True), vct[i]) for i in range(3))
-            
+
             dc_du_T_D_inv_vct = sum(
-                np.einsum('...jk,...j->k', dc_du[i], D_inv_vct[i]) 
+                np.einsum('...jk,...j->k', dc_du[i], D_inv_vct[i])
                 for i in range(3))
 
             C_inv_dc_du_T_D_inv_vct = sla.cho_solve(
                 (chol_C, True), dc_du_T_D_inv_vct)
-            
+
             return np.concatenate([
                 sla.cho_solve(
-                    (chol_D[i], True), 
+                    (chol_D[i], True),
                     vct[i] - dc_du[i] @ C_inv_dc_du_T_D_inv_vct).flatten()
                 for i in range(3)])
 
@@ -353,12 +353,12 @@ class ConditionedDiffusionConstrainedSystem(EuclideanMetricSystem):
         self._lmult_by_jacob_constr = api.jit(lmult_by_jacob_constr)
         self._rmult_by_jacob_constr = api.jit(rmult_by_jacob_constr)
         self._lmult_by_inv_gram = api.jit(lmult_by_inv_gram)
-    
+
     @cache_in_state('pos', 'x_obs_seq', 'partition')
     def constr(self, state):
         return onp.array(
             self._constr(state.pos, state.x_obs_seq, state.partition))
-    
+
     @cache_in_state('pos', 'x_obs_seq', 'partition')
     def jacob_constr_blocks(self, state):
         dc_du, dc_dv = self._jacob_constr_blocks(
@@ -367,29 +367,29 @@ class ConditionedDiffusionConstrainedSystem(EuclideanMetricSystem):
             tuple(onp.array(block) for block in dc_du),
             tuple(onp.array(block) for block in dc_dv)
         )
-    
+
     @cache_in_state('pos', 'x_obs_seq', 'partition')
     def chol_gram_blocks(self, state):
         dc_du, dc_dv = self.jacob_constr_blocks(state)
         chol_C, chol_D = self._chol_gram_blocks(dc_du, dc_dv)
         return onp.array(chol_C), tuple(onp.array(chol) for chol in chol_D)
-    
+
     @cache_in_state('pos', 'x_obs_seq', 'partition')
     def log_det_sqrt_gram(self, state):
         chol_C, chol_D = self.chol_gram_blocks(state)
         val = self._log_det_sqrt_gram_from_chol(chol_C, chol_D)
         return float(val)
-       
-    @multi_cache_in_state(['pos', 'x_obs_seq', 'partition'], 
-                          ['grad_log_det_sqrt_gram', 'log_det_sqrt_gram', 
+
+    @multi_cache_in_state(['pos', 'x_obs_seq', 'partition'],
+                          ['grad_log_det_sqrt_gram', 'log_det_sqrt_gram',
                            'jacob_constr_blocks', 'chol_gram_blocks'])
     def grad_log_det_sqrt_gram(self, state):
-        (val, ((dc_du, dc_dv), 
+        (val, ((dc_du, dc_dv),
                (chol_C, chol_D))), grad = self._grad_log_det_sqrt_gram(
             state.pos, state.x_obs_seq, state.partition)
         return (
-            onp.array(grad), float(val), 
-            (tuple(onp.array(block) for block in dc_du), 
+            onp.array(grad), float(val),
+            (tuple(onp.array(block) for block in dc_du),
              tuple(onp.array(block) for block in dc_dv)),
             (onp.array(chol_C), tuple(onp.array(chol) for chol in chol_D))
         )
@@ -399,26 +399,26 @@ class ConditionedDiffusionConstrainedSystem(EuclideanMetricSystem):
 
     def dh1_dpos(self, state):
         return (
-            self.grad_neg_log_dens(state) + 
+            self.grad_neg_log_dens(state) +
             self.grad_log_det_sqrt_gram(state))
-    
+
     def lmult_by_jacob_constr(self, state, vct):
         dc_du, dc_dv = self.jacob_constr_blocks(state)
         return onp.asarray(self._lmult_by_jacob_constr(dc_du, dc_dv, vct))
-    
+
     def rmult_by_jacob_constr(self, state, vct):
         dc_du, dc_dv = self.jacob_constr_blocks(state)
         return onp.asarray(self._rmult_by_jacob_constr(dc_du, dc_dv, vct))
-    
+
     def lmult_by_inv_gram(self, state, vct):
         dc_du, dc_dv = self.jacob_constr_blocks(state)
         chol_C, chol_D = self.chol_gram_blocks(state)
         return onp.asarray(
             self._lmult_by_inv_gram(dc_du, dc_dv, chol_C, chol_D, vct))
-    
+
     def update_x_obs_seq(self, state):
         state.x_obs_seq = self._generate_x_obs_seq(state.pos)
-        
+
     def project_onto_cotangent_space(self, mom, state):
         mom -= onp.array(
             self.rmult_by_jacob_constr(
@@ -432,12 +432,12 @@ class ConditionedDiffusionConstrainedSystem(EuclideanMetricSystem):
         mom = self.project_onto_cotangent_space(mom, state)
         return mom
 
-    
+
 def no_u_turn_criterion(system, state_1, state_2, sum_mom):
     return (
-        np.sum(system.dh_dmom(state_1)[:system.dim_u_v0] * 
+        np.sum(system.dh_dmom(state_1)[:system.dim_u_v0] *
                sum_mom[:system.dim_u_v0]) < 0 or
-        np.sum(system.dh_dmom(state_2)[:system.dim_u_v0] * 
+        np.sum(system.dh_dmom(state_2)[:system.dim_u_v0] *
                sum_mom[:system.dim_u_v0]) < 0)
 
 
@@ -464,8 +464,8 @@ class SwitchPartitionTransition(Transition):
 
 
 class ConditionedDiffusionHamiltonianState(ChainState):
-    
-    def __init__(self, pos, x_obs_seq, partition=0, mom=None, dir=1, 
+
+    def __init__(self, pos, x_obs_seq, partition=0, mom=None, dir=1,
                  _call_counts=None, _dependencies=None, _cache=None):
         if _call_counts is None:
             _call_counts = {}
@@ -474,9 +474,9 @@ class ConditionedDiffusionHamiltonianState(ChainState):
             mom=mom, dir=dir, _call_counts=_call_counts,
             _dependencies=_dependencies, _cache=_cache)
 
-        
+
 def solve_projection_onto_manifold_quasi_newton(
-        state, state_prev, dt, system, 
+        state, state_prev, dt, system,
         convergence_tol=1e-8, position_tol=1e-8,
         divergence_tol=1e10, max_iters=50, norm=maximum_norm):
     mu = onp.zeros_like(state.pos)
