@@ -18,6 +18,9 @@ from mici.errors import ConvergenceError
 from functools import partial
 
 
+logger = logging.getLogger(__name__)
+
+
 def split(v, lengths):
     i = 0
     for l in lengths:
@@ -505,11 +508,19 @@ def solve_projection_onto_manifold_quasi_newton(
         f'Last |c|={error:.1e}, |δq|={norm(delta_pos)}.')
 
 
-def get_initial_state(system, rng, generate_x_obs_seq_init, dim_q, tol, 
-                      reg_coeff=5e-2, coarse_tol=1e-1, max_iters=1000):
+def get_initial_state(system, rng, generate_x_obs_seq_init, dim_q, tol,
+                      adam_step_size=2e-1, reg_coeff=5e-2, coarse_tol=1e-1,
+                      max_iters=1000, max_num_tries=10):
+    """Find an initial constraint satisying state.
+
+    Uses a heuristic combination of gradient-based minimisation of the norm
+    of a modified constraint function plus a subsequent projection step using a
+    quasi-Newton method, to try to find an initial point `q` such that
+    `max(abs(constr(q)) < tol`.
+    """
 
     # Use optimizers to set optimizer initialization and update functions
-    opt_init, opt_update, get_params = opt.adam(2e-1)
+    opt_init, opt_update, get_params = opt.adam(adam_step_size)
 
     # Define a compiled update step
     @api.jit
@@ -520,18 +531,19 @@ def get_initial_state(system, rng, generate_x_obs_seq_init, dim_q, tol,
         opt_state = opt_update(i, grad, opt_state)
         return opt_state, obj, constr
 
-    converged = False
-    while not converged:
+    for t in range(max_num_tries):
+        logging.info(f'Starting try {t+1}')
         q_init = rng.standard_normal(dim_q)
         x_obs_seq_init = generate_x_obs_seq_init(rng)
         opt_state = opt_init((q_init,))
         for i in range(max_iters):
             opt_state_next, norm, constr = step(i, opt_state, x_obs_seq_init)
             if not np.isfinite(norm):
-                logging.info('Diverged')
+                logger.info('Adam iteration diverged')
                 break
             max_abs_constr = maximum_norm(constr)
             if max_abs_constr < coarse_tol:
+                logging.info('Within coarse_tol attempting projection.')
                 q_init, = get_params(opt_state)
                 state = ConditionedDiffusionHamiltonianState(
                     q_init, x_obs_seq=x_obs_seq_init)
@@ -539,12 +551,13 @@ def get_initial_state(system, rng, generate_x_obs_seq_init, dim_q, tol,
                     state = solve_projection_onto_manifold_quasi_newton(
                         state, state, 1., system, tol)
                 except ConvergenceError:
-                    logging.info('Quasi-Newton iteration diverged.')
+                    logger.info('Quasi-Newton iteration diverged.')
                 if np.max(np.abs(system.constr(state))) < tol:
-                    converged = True
-                    break
+                    logging.info('Found constraint satisfying state.')
+                    state.mom = system.sample_momentum(state, rng)
+                    return state
             if i % 100 == 0:
                 logging.info(f'Iteration {i: >6}: mean|constr|^2 = {norm:.3e} '
                              f'max|constr| = {max_abs_constr:.3e}')
             opt_state = opt_state_next
-    return state
+    raise RuntimeError(f'Did not find valid state in {max_num_tries} tries.')
