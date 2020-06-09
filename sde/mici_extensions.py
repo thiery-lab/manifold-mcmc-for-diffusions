@@ -88,6 +88,7 @@ class ConditionedDiffusionConstrainedSystem(EuclideanMetricSystem):
             x_n = forward_op_func(x, v, delta, params)
             return (x_n, x_n)
 
+        @api.jit
         def generate_x_obs_seq(q):
             u, v_0, v_r = np.split(q, (num_param, num_param + dim_state))
             params = generate_params(u)
@@ -161,6 +162,7 @@ class ConditionedDiffusionConstrainedSystem(EuclideanMetricSystem):
                 v_seq_0, v_seq_1, v_seq_2, x_init_1, x_init_2,
                 y_tilde_0, y_tilde_1, y_tilde_2)
 
+        @api.partial(api.jit, static_argnums=(2,))
         def constr(q, x_obs_seq, partition=0):
             """Calculate constraint function for current partition."""
             u, v_init, v_seq_flat = split(q, (num_param, dim_state,))
@@ -179,6 +181,8 @@ class ConditionedDiffusionConstrainedSystem(EuclideanMetricSystem):
             _, x_seq = lax.scan(partial(step_func, params=params), x_init, v_seq)
             return x_seq[-1]
 
+        
+        @api.jit
         def constr_full(q, x_obs_seq):
             u, v_init, v_seq_flat = split(q, (num_param, dim_state,))
             v_seq_blk = np.reshape(
@@ -193,6 +197,7 @@ class ConditionedDiffusionConstrainedSystem(EuclideanMetricSystem):
             c = constr_full(q, x_obs_seq)
             return 0.5 * np.mean(c**2) + 0.5 * reg_coeff * np.mean(q**2), c
 
+        @api.partial(api.jit, static_argnums=(2,))
         def jacob_constr_blocks(q, x_obs_seq, partition=0):
             """Return non-zero blocks of constraint function Jacobian.
 
@@ -246,7 +251,8 @@ class ConditionedDiffusionConstrainedSystem(EuclideanMetricSystem):
             dc_2_du, dc_2_dv_2 = api.jacrev(gen_2, (0, 1))(u, v_2, x_init_2)
             return (
                 (dc_0_du, dc_1_du, dc_2_du),  (dc_0_dv_0, dc_1_dv_1, dc_2_dv_2))
-
+        
+        @api.jit
         def chol_gram_blocks(dc_du, dc_dv):
             """Calculate Cholesky factors of decomposition of Gram matrix. """
             if isinstance(metric, IdentityMatrix):
@@ -271,7 +277,7 @@ class ConditionedDiffusionConstrainedSystem(EuclideanMetricSystem):
 
             return chol_C, chol_D
 
-
+        @api.jit
         def log_det_sqrt_gram_from_chol(chol_C, chol_D):
             """Calculate log-det of Gram matrix from Cholesky factors."""
             return (
@@ -280,7 +286,7 @@ class ConditionedDiffusionConstrainedSystem(EuclideanMetricSystem):
                 np.log(np.abs(chol_C.diagonal())).sum() - log_det_sqrt_metric_1
             )
 
-
+        @api.partial(api.jit, static_argnums=(2,))
         def log_det_sqrt_gram(q, x_obs_seq, partition=0):
             """Calculate log-determinant of constraint Jacobian Gram matrix."""
             dc_du, dc_dv = jacob_constr_blocks(q, x_obs_seq, partition)
@@ -289,7 +295,7 @@ class ConditionedDiffusionConstrainedSystem(EuclideanMetricSystem):
                 log_det_sqrt_gram_from_chol(chol_C, chol_D),
                 ((dc_du, dc_dv), (chol_C, chol_D)))
 
-
+        @api.jit
         def lmult_by_jacob_constr(dc_du, dc_dv, vct):
             """Left-multiply vector by constraint Jacobian matrix."""
             vct_u, vct_v = split(vct, (num_param,))
@@ -304,7 +310,8 @@ class ConditionedDiffusionConstrainedSystem(EuclideanMetricSystem):
                     dc_dv[2] @ vct_v[-j2:]
                 ))
             )
-
+        
+        @api.jit
         def rmult_by_jacob_constr(dc_du, dc_dv, vct):
             """Right-multiply vector by constraint Jacobian matrix."""
             vct_0, vct_1, vct_2 = split(
@@ -319,7 +326,8 @@ class ConditionedDiffusionConstrainedSystem(EuclideanMetricSystem):
                 np.einsum('ijk,ij->ik', dc_dv[1], vct_1_blocks).flatten(),
                 dc_dv[2].T @ vct_2
             ])
-
+ 
+        @api.jit
         def lmult_by_inv_gram(dc_du, dc_dv, chol_C, chol_D, vct):
             """Left-multiply vector by inverse Gram matrix."""
             vct = list(split(
@@ -342,24 +350,63 @@ class ConditionedDiffusionConstrainedSystem(EuclideanMetricSystem):
                     (chol_D[i], True),
                     vct[i] - dc_du[i] @ C_inv_dc_du_T_D_inv_vct).flatten()
                 for i in range(3)])
+        
+        @api.jit
+        def normal_space_component(vct, dc_du, dc_dv, chol_C, chol_D):
+            return rmult_by_jacob_constr(
+                    dc_du, dc_dv, lmult_by_inv_gram(
+                        dc_du, dc_dv, chol_C, chol_D, lmult_by_jacob_constr(
+                            dc_du, dc_dv, vct)))
+        
+        @api.partial(api.jit, static_argnums=(2, 7, 8, 9, 10))
+        def quasi_newton_projection(
+                q, x_obs_seq, partition, dc_du_prev, dc_dv_prev, chol_C_prev, 
+                chol_D_prev, convergence_tol, position_tol, divergence_tol, 
+                max_iters):
+            
+            norm = lambda x: np.max(np.abs(x))
+            
+            def body_func(val):
+                q, i, _, _ = val
+                c = constr(q, x_obs_seq, partition)
+                error = norm(c)
+                delta_q = rmult_by_jacob_constr(
+                    dc_du_prev, dc_dv_prev, lmult_by_inv_gram(
+                        dc_du_prev, dc_dv_prev, chol_C_prev, chol_D_prev, c))
+                q -= delta_q
+                i += 1
+                return q, i, norm(delta_q), error
 
-        self._generate_x_obs_seq = api.jit(generate_x_obs_seq)
-        self._constr = api.jit(constr, (2,))
-        self._jacob_constr_blocks = api.jit(jacob_constr_blocks, (2,))
-        self._chol_gram_blocks = api.jit(chol_gram_blocks)
-        self._log_det_sqrt_gram_from_chol = api.jit(log_det_sqrt_gram_from_chol)
+            def cond_func(val):
+                q, i, norm_delta_q, error, = val
+                diverged = np.logical_or(
+                    error > divergence_tol, np.isnan(error))
+                converged = np.logical_and(
+                    error < convergence_tol, norm_delta_q < position_tol)
+                return np.logical_not(np.logical_or(
+                    (i >= max_iters), np.logical_or(diverged, converged)))
+            
+            return lax.while_loop(cond_func, body_func, (q, 0, np.inf, -1.))
+
+        self._generate_x_obs_seq = generate_x_obs_seq
+        self._constr = constr
+        self._jacob_constr_blocks = jacob_constr_blocks
+        self._chol_gram_blocks = chol_gram_blocks
+        self._log_det_sqrt_gram_from_chol = log_det_sqrt_gram_from_chol
         self._grad_log_det_sqrt_gram = api.jit(
             api.value_and_grad(log_det_sqrt_gram, has_aux=True), (2,))
-        self._constr_full = api.jit(constr_full)
+        self._constr_full = constr_full
         self.value_and_grad_init_objective= api.jit(
             api.value_and_grad(init_objective, (0,), has_aux=True))
-        self._lmult_by_jacob_constr = api.jit(lmult_by_jacob_constr)
-        self._rmult_by_jacob_constr = api.jit(rmult_by_jacob_constr)
-        self._lmult_by_inv_gram = api.jit(lmult_by_inv_gram)
+        self._lmult_by_jacob_constr = lmult_by_jacob_constr
+        self._rmult_by_jacob_constr = rmult_by_jacob_constr
+        self._lmult_by_inv_gram = lmult_by_inv_gram
+        self._normal_space_component = normal_space_component
+        self.quasi_newton_projection = quasi_newton_projection
 
     @cache_in_state('pos', 'x_obs_seq', 'partition')
     def constr(self, state):
-        return onp.array(
+        return onp.asarray(
             self._constr(state.pos, state.x_obs_seq, state.partition))
 
     @cache_in_state('pos', 'x_obs_seq', 'partition')
@@ -367,15 +414,15 @@ class ConditionedDiffusionConstrainedSystem(EuclideanMetricSystem):
         dc_du, dc_dv = self._jacob_constr_blocks(
             state.pos, state.x_obs_seq, state.partition)
         return (
-            tuple(onp.array(block) for block in dc_du),
-            tuple(onp.array(block) for block in dc_dv)
+            tuple(onp.asarray(block) for block in dc_du),
+            tuple(onp.asarray(block) for block in dc_dv)
         )
 
     @cache_in_state('pos', 'x_obs_seq', 'partition')
     def chol_gram_blocks(self, state):
         dc_du, dc_dv = self.jacob_constr_blocks(state)
         chol_C, chol_D = self._chol_gram_blocks(dc_du, dc_dv)
-        return onp.array(chol_C), tuple(onp.array(chol) for chol in chol_D)
+        return onp.asarray(chol_C), tuple(onp.asarray(chol) for chol in chol_D)
 
     @cache_in_state('pos', 'x_obs_seq', 'partition')
     def log_det_sqrt_gram(self, state):
@@ -391,10 +438,10 @@ class ConditionedDiffusionConstrainedSystem(EuclideanMetricSystem):
                (chol_C, chol_D))), grad = self._grad_log_det_sqrt_gram(
             state.pos, state.x_obs_seq, state.partition)
         return (
-            onp.array(grad), float(val),
-            (tuple(onp.array(block) for block in dc_du),
-             tuple(onp.array(block) for block in dc_dv)),
-            (onp.array(chol_C), tuple(onp.array(chol) for chol in chol_D))
+            onp.asarray(grad), float(val),
+            (tuple(onp.asarray(block) for block in dc_du),
+             tuple(onp.asarray(block) for block in dc_dv)),
+            (onp.asarray(chol_C), tuple(onp.asarray(chol) for chol in chol_D))
         )
 
     def h1(self, state):
@@ -421,13 +468,15 @@ class ConditionedDiffusionConstrainedSystem(EuclideanMetricSystem):
 
     def update_x_obs_seq(self, state):
         state.x_obs_seq = self._generate_x_obs_seq(state.pos)
+        
+    def normal_space_component(self, state, vct):
+        dc_du, dc_dv = self.jacob_constr_blocks(state)
+        chol_C, chol_D = self.chol_gram_blocks(state)
+        return onp.asarray(
+            self._normal_space_component(vct, dc_du, dc_dv, chol_C, chol_D))
 
     def project_onto_cotangent_space(self, mom, state):
-        mom -= onp.array(
-            self.rmult_by_jacob_constr(
-                state, self.lmult_by_inv_gram(
-                    state, self.lmult_by_jacob_constr(
-                        state, self.metric.inv @ mom))))
+        mom -= self.normal_space_component(state, self.metric.inv @ mom)
         return mom
 
     def sample_momentum(self, state, rng):
@@ -476,6 +525,30 @@ class ConditionedDiffusionHamiltonianState(ChainState):
             pos=pos, x_obs_seq=x_obs_seq, partition=partition,
             mom=mom, dir=dir, _call_counts=_call_counts,
             _dependencies=_dependencies, _cache=_cache)
+
+        
+def jitted_solve_projection_onto_manifold_quasi_newton(
+        state, state_prev, dt, system,
+        convergence_tol=1e-8, position_tol=1e-8,
+        divergence_tol=1e10, max_iters=50, norm=maximum_norm):
+    dc_du_prev, dc_dv_prev = system.jacob_constr_blocks(state_prev)
+    chol_C_prev, chol_D_prev = system.chol_gram_blocks(state_prev)
+    q, x_obs_seq, partition = state.pos, state.x_obs_seq, state.partition
+    q_, i, norm_delta_q, error = system.quasi_newton_projection(                
+        q, x_obs_seq, partition, dc_du_prev, dc_dv_prev, chol_C_prev, 
+        chol_D_prev, convergence_tol, position_tol, divergence_tol, max_iters)
+    if error < convergence_tol and norm_delta_q < position_tol:
+        state.pos = onp.asarray(q_)
+        state.mom = system.metric @ (state.pos - state_prev.pos) / dt
+        return state
+    elif error > divergence_tol or np.isnan(error):
+        raise ConvergenceError(
+            f'Quasi-Newton iteration diverged on iteration {i}. '
+            f'Last |c|={error:.1e}, |δq|={norm_delta_q}.')
+    else:
+        raise ConvergenceError(
+            f'Quasi-Newton iteration did not converge. '
+            f'Last |c|={error:.1e}, |δq|={norm_delta_q}.')
 
 
 def solve_projection_onto_manifold_quasi_newton(
@@ -548,7 +621,7 @@ def get_initial_state(system, rng, generate_x_obs_seq_init, dim_q, tol,
                 state = ConditionedDiffusionHamiltonianState(
                     q_init, x_obs_seq=x_obs_seq_init)
                 try:
-                    state = solve_projection_onto_manifold_quasi_newton(
+                    state = jitted_solve_projection_onto_manifold_quasi_newton(
                         state, state, 1., system, tol)
                 except ConvergenceError:
                     logger.info('Quasi-Newton iteration diverged.')
