@@ -522,13 +522,14 @@ class ConditionedDiffusionHamiltonianState(ChainState):
     """
 
     def __init__(self, pos, x_obs_seq, partition=0, mom=None, dir=1,
-                 _call_counts=None, _dependencies=None, _cache=None):
+                 _call_counts=None, _dependencies=None, _cache=None,
+                 _read_only=False):
         if _call_counts is None:
             _call_counts = {}
         super().__init__(
             pos=pos, x_obs_seq=x_obs_seq, partition=partition,
             mom=mom, dir=dir, _call_counts=_call_counts,
-            _dependencies=_dependencies, _cache=_cache)
+            _dependencies=_dependencies, _cache=_cache, _read_only=_read_only)
 
 
 def jitted_solve_projection_onto_manifold_quasi_newton(
