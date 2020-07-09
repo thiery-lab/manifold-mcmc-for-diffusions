@@ -6,11 +6,11 @@ import jax.scipy.linalg as sla
 from jax import lax, api
 import jax.experimental.optimizers as opt
 from mici.systems import (
-    EuclideanMetricSystem, cache_in_state, multi_cache_in_state)
+    EuclideanMetricSystem, cache_in_state, cache_in_state_with_aux)
 from mici.matrices import (
     SymmetricBlockDiagonalMatrix, IdentityMatrix, PositiveDiagonalMatrix)
 from mici.transitions import Transition
-from mici.states import ChainState
+from mici.states import ChainState, _cache_key_func
 from mici.solvers import maximum_norm
 from mici.errors import ConvergenceError
 
@@ -274,7 +274,7 @@ class ConditionedDiffusionConstrainedSystem(EuclideanMetricSystem):
 
             u, v_0, v_seq_flat = split(q, (dim_z, dim_x,))
             v_seq = np.reshape(v_seq_flat, (-1, dim_v))
-            (v_subseqs, w_inits, y_bars) = partition_into_subseqs(
+            (v_subseqs, w_inits, _) = partition_into_subseqs(
                  v_seq, v_0, x_obs_seq, partition)
             v_bars = (
                 np.concatenate([v_0, v_subseqs[0].flatten()]),
@@ -292,7 +292,40 @@ class ConditionedDiffusionConstrainedSystem(EuclideanMetricSystem):
 
         @api.jit
         def chol_gram_blocks(dc_du, dc_dv):
-            """Calculate Cholesky factors of decomposition of Gram matrix. """
+            """Calculate Cholesky factors of decomposition of ∂c(q) M⁻¹ ∂c(q)ᵀ.
+            
+            The constraint Jacobian decomposes as
+            
+                ∂c([u, v]) = [∂₀c̅(u, v), ∂₁c̅(u, v)]
+
+            where c̅(u, v) = c([u, v]) and ∂₀c̅(u, v) is a dense tall
+            rectangular matrix and ∂₁c̅(u, v) is a rectangular block diagonal
+            matrix. Similarly the metric matrix represention M is assumed to
+            have the block structure M = diag(M₀, M₁) where M₀ is a square
+            matrix of the same size as u and M₁ is a square matrix of the same
+            size as v.
+
+            The Gram matrix can therefore be decomposed as
+
+                ∂c([u, v]) M⁻¹ ∂c([u, v])ᵀ =
+                ∂₀c̅(u, v) M₀⁻¹ ∂₀c̅(u, v)ᵀ + ∂₁c̅(u, v) M₁⁻¹ ∂₁c̅(u, v)ᵀ
+
+            denoting
+            
+                D(u, v) = ∂₁c̅(u, v) M₁⁻¹ ∂₁c̅(u, v)ᵀ
+                
+            with D square block diagonal and positive definite and
+
+                C(u, v) = M₀ + ∂₀c̅(u, v)ᵀ D(u, v)⁻¹ ∂₀c̅(u, v)
+
+            with C positive definite, by the Woodbury matrix identity we have
+
+                (∂c([u, v]) M⁻¹ ∂c([u, v])ᵀ)⁻¹ =
+                D(u, v)⁻¹ - D(u, v)⁻¹ ∂₀c̅(u, v) C(u, v)⁻¹ ∂₀c̅(u, v)ᵀ D(u, v)⁻¹
+
+            Therefore by computing the Cholesky decomposition of C(u, v) and
+            the blocks of D(u, v) we can solve for systems in the Gram matrix.
+            """
             if isinstance(metric, IdentityMatrix):
                 D = tuple(np.einsum('...ij,...kj', dc_dv[i], dc_dv[i])
                           for i in range(3))
@@ -313,6 +346,68 @@ class ConditionedDiffusionConstrainedSystem(EuclideanMetricSystem):
                  np.einsum('ijk,ijl->kl', dc_du[1], D_inv_dc_du[1]) +
                  dc_du[2].T @ D_inv_dc_du[2]))
             return chol_C, chol_D
+
+        @api.jit
+        def lu_jacob_product_blocks(dc_du_l, dc_dv_l, dc_du_r, dc_dv_r):
+            """Calculate LU factors of decomposition of ∂c(q) M⁻¹ ∂c(q')ᵀ    
+
+            The constraint Jacobian decomposes as
+
+                ∂c([u, v]) = [∂₀c̅(u, v), ∂₁c̅(u, v)]
+
+            where c̅(u, v) = c([u, v]) and ∂₀c̅(u, v) is a dense tall
+            rectangular matrix and ∂₁c̅(u, v) is a rectangular block diagonal
+            matrix. Similarly the metric matrix represention M is assumed to
+            have the block structure M = diag(M₀, M₁) where M₀ is a square
+            matrix of the same size as u and M₁ is a square matrix of the same
+            size as v.
+
+            The Jacobian product ∂c([u, v]) M⁻¹ ∂c([u', v'])ᵀ can therefore be
+            decomposed as
+
+                ∂c([u, v]) M⁻¹ ∂c([u', v'])ᵀ =
+                ∂₀c̅(u, v) M₀⁻¹ ∂₀c̅(u', v')ᵀ + ∂₁c̅(u', v') M₁⁻¹ ∂₁c̅(u', v')ᵀ
+
+            denoting
+
+                D(u, v, u', v') = ∂₁c̅(u, v) M₁⁻¹ ∂₁c̅(u', v')ᵀ
+
+            with D square block diagonal and
+
+                C(u, v, u', v') = M₀ + ∂₀c̅(u', v')ᵀ D(u, v)⁻¹ ∂₀c̅(u, v)
+
+            we then have by the Woodbury matrix identity
+
+                (∂c([u, v]) M⁻¹ ∂c([u', v'])ᵀ)⁻¹ =
+                D(u, v, u', v')⁻¹ -
+                D(u, v, u', v')⁻¹ ∂₀c̅(u, v) C(u, v, u', v')⁻¹ ∂₀c̅(u', v')ᵀ
+                D(u, v, u', v')⁻¹
+
+            Therefore by computing the Cholesky decomposition of C and
+            the blocks of D we can solve for systems in the Jacobian product.
+            """
+            if isinstance(metric, IdentityMatrix):
+                D = tuple(np.einsum('...ij,...kj', dc_dv_l[i], dc_dv_r[i])
+                          for i in range(3))
+            else:
+                m_v = split(
+                    metric_2_diag, (dc_dv_l[0].shape[1],
+                                    dc_dv_l[1].shape[0] * dc_dv_l[1].shape[2]))
+                m_v[1] = m_v[1].reshape(
+                    (dc_dv_l[1].shape[0], dc_dv_l[1].shape[2]))
+                D = tuple(np.einsum('...ij,...kj',
+                                    dc_dv_l[i] / m_v[i][..., None, :],
+                                    dc_dv_r[i])
+                          for i in range(3))
+            lu_and_piv_D = tuple(sla.lu_factor(D[i]) for i in range(3))
+            D_inv_dc_du_l = tuple(
+                sla.lu_solve(lu_and_piv_D[i], dc_du_l[i]) for i in range(3))
+            lu_and_piv_C = sla.lu_factor(
+                metric_1 +
+                (dc_du_r[0].T @ D_inv_dc_du_l[0] +
+                 np.einsum('ijk,ijl->kl', dc_du_r[1], D_inv_dc_du_l[1]) +
+                 dc_du_r[2].T @ D_inv_dc_du_l[2]))
+            return lu_and_piv_C, lu_and_piv_D
 
         @api.jit
         def log_det_sqrt_gram_from_chol(chol_C, chol_D):
@@ -384,19 +479,44 @@ class ConditionedDiffusionConstrainedSystem(EuclideanMetricSystem):
             ])
 
         @api.jit
+        def lmult_by_inv_jacob_product(
+                dc_du_l, dc_dv_l, dc_du_r, dc_dv_r, lu_and_piv_C, lu_and_piv_D,
+                vct):
+            """Left-multiply vector by inverse of Jacobian product matrix."""
+            vct_parts = split(
+                vct, (dc_du_l[0].shape[0], 
+                      dc_du_l[1].shape[0] * dc_du_l[1].shape[1]))
+            vct_parts[1] = np.reshape(vct_parts[1], dc_du_l[1].shape[:2])
+            D_inv_vct = [sla.lu_solve(lu_and_piv_D[i], vct_parts[i])
+                         for i in range(3)]
+            dc_du_r_T_D_inv_vct = sum(
+                np.einsum('...jk,...j->k', dc_du_r[i], D_inv_vct[i])
+                for i in range(3))
+            C_inv_dc_du_r_T_D_inv_vct = sla.lu_solve(
+                lu_and_piv_C, dc_du_r_T_D_inv_vct)
+            return np.concatenate([
+                sla.lu_solve(
+                    lu_and_piv_D[i],
+                    vct_parts[i] - dc_du_l[i] @ C_inv_dc_du_r_T_D_inv_vct
+                ).flatten()
+                for i in range(3)
+            ])
+
+        @api.jit
         def normal_space_component(vct, dc_du, dc_dv, chol_C, chol_D):
             return rmult_by_jacob_constr(
                 dc_du, dc_dv, lmult_by_inv_gram(
                     dc_du, dc_dv, chol_C, chol_D, lmult_by_jacob_constr(
                         dc_du, dc_dv, vct)))
 
+        def norm(x):
+            return np.max(np.abs(x))
+
         @api.partial(api.jit, static_argnums=(2, 7, 8, 9, 10))
         def quasi_newton_projection(
                 q, x_obs_seq, partition, dc_du_prev, dc_dv_prev, chol_C_prev,
                 chol_D_prev, convergence_tol, position_tol, divergence_tol,
                 max_iters):
-
-            norm = lambda x: np.max(np.abs(x))
 
             def body_func(val):
                 q, i, _, _ = val
@@ -410,7 +530,38 @@ class ConditionedDiffusionConstrainedSystem(EuclideanMetricSystem):
                 return q, i, norm(delta_q), error
 
             def cond_func(val):
-                q, i, norm_delta_q, error, = val
+                _, i, norm_delta_q, error, = val
+                diverged = np.logical_or(
+                    error > divergence_tol, np.isnan(error))
+                converged = np.logical_and(
+                    error < convergence_tol, norm_delta_q < position_tol)
+                return np.logical_not(np.logical_or(
+                    (i >= max_iters), np.logical_or(diverged, converged)))
+
+            return lax.while_loop(cond_func, body_func, (q, 0, np.inf, -1.))
+
+        @api.partial(api.jit, static_argnums=(2, 5, 6, 7, 8))
+        def newton_projection(
+                q, x_obs_seq, partition, dc_du_prev, dc_dv_prev,
+                convergence_tol, position_tol, divergence_tol, max_iters):
+
+            def body_func(val):
+                q, i, _, _ = val
+                c = constr(q, x_obs_seq, partition)
+                dc_du, dc_dv = jacob_constr_blocks(q, x_obs_seq, partition)
+                lu_and_piv_C, lu_and_piv_D = lu_jacob_product_blocks(
+                    dc_du, dc_dv, dc_du_prev, dc_dv_prev)
+                error = norm(c)
+                delta_q = rmult_by_jacob_constr(
+                    dc_du_prev, dc_dv_prev, lmult_by_inv_jacob_product(
+                        dc_du, dc_dv, dc_du_prev, dc_dv_prev, lu_and_piv_C,
+                        lu_and_piv_D, c))
+                q -= delta_q
+                i += 1
+                return q, i, norm(delta_q), error
+
+            def cond_func(val):
+                _, i, norm_delta_q, error, = val
                 diverged = np.logical_or(
                     error > divergence_tol, np.isnan(error))
                 converged = np.logical_and(
@@ -424,6 +575,7 @@ class ConditionedDiffusionConstrainedSystem(EuclideanMetricSystem):
         self._constr = constr
         self._jacob_constr_blocks = jacob_constr_blocks
         self._chol_gram_blocks = chol_gram_blocks
+        self._lu_jacob_product_blocks = lu_jacob_product_blocks
         self._log_det_sqrt_gram_from_chol = log_det_sqrt_gram_from_chol
         self._grad_log_det_sqrt_gram = api.jit(
             api.value_and_grad(log_det_sqrt_gram, has_aux=True), (2,))
@@ -431,6 +583,7 @@ class ConditionedDiffusionConstrainedSystem(EuclideanMetricSystem):
             api.value_and_grad(init_objective, (0,), has_aux=True))
         self._normal_space_component = normal_space_component
         self.quasi_newton_projection = quasi_newton_projection
+        self.newton_projection = newton_projection
 
     @cache_in_state('pos', 'x_obs_seq', 'partition')
     def constr(self, state):
@@ -452,9 +605,9 @@ class ConditionedDiffusionConstrainedSystem(EuclideanMetricSystem):
         return float(
             self._log_det_sqrt_gram_from_chol(*self.chol_gram_blocks(state)))
 
-    @multi_cache_in_state(['pos', 'x_obs_seq', 'partition'],
-                          ['grad_log_det_sqrt_gram', 'log_det_sqrt_gram',
-                           'jacob_constr_blocks', 'chol_gram_blocks'])
+    @cache_in_state_with_aux(
+        ('pos', 'x_obs_seq', 'partition'),
+        ('log_det_sqrt_gram', 'jacob_constr_blocks', 'chol_gram_blocks'))
     def grad_log_det_sqrt_gram(self, state):
         (val, (jacob_constr_blocks, chol_gram_blocks)), grad = (
            self._grad_log_det_sqrt_gram(
@@ -536,16 +689,37 @@ def jitted_solve_projection_onto_manifold_quasi_newton(
         state, state_prev, dt, system,
         convergence_tol=1e-8, position_tol=1e-8,
         divergence_tol=1e10, max_iters=50, norm=maximum_norm):
-    """Quasi-Newton iterative solver for projecting points onto manifold.
+    """Symmetric quasi-Newton solver for projecting points onto manifold.
 
-    Solves an equation of the form `c(q_ + ∂c(q)ᵀλ) = 0` for the vector of
-    Lagrange multipliers `λ` to project a point `q_` on to the manifold defined
-    by the zero level set of `c`, with the projection performed with in the
-    linear subspace defined by the rows of the Jacobian matrix `∂c(q)` evaluated
-    at a previous point on the manifold `q`.
+    Solves an equation of the form `r(λ) = c(q_ + M⁻¹ ∂c(q)ᵀλ) = 0` for the
+    vector of Lagrange multipliers `λ` to project a point `q_` on to the
+    manifold defined by the zero level set of `c`, with the projection performed
+    with in the linear subspace defined by the rows of the Jacobian matrix
+    `∂c(q)` evaluated at a previous point on the manifold `q`.
+
+    The Jacobian of the residual function `r` is
+
+        ∂r(λ) = ∂c(q_ + M⁻¹ ∂c(q)ᵀλ) M⁻¹ ∂c(q)ᵀ
+
+    such that the full Newton update
+
+        λ = λ - ∂r(λ)⁻¹ r(λ)
+
+    requires evaluating `∂c` on each iteration. The symmetric quasi-Newton
+    iteration instead uses the approximation
+
+        ∂c(q_ + ∂c(q)ᵀλ) M⁻¹ ∂c(q)ᵀ ≈ ∂c(q) M⁻¹ ∂c(q)ᵀ
+
+    with the corresponding update
+
+        λ = λ - (∂c(q) M⁻¹ ∂c(q)ᵀ)⁻¹ r(λ)
+
+    allowing a previously computed Cholesky decomposition of the Gram matrix
+    `∂c(q) M⁻¹ ∂c(q)ᵀ` to be used to solve the linear system in each iteration
+    with no requirement to evaluate `∂c` on each iteration.
 
     Compared to the inbuilt solver in `mici.solvers` this version exploits the
-    structure in constraint Jacobian `∂c(q)` for conditioned diffusion systems
+    structure in the constraint Jacobian `∂c` for conditioned diffusion systems
     and JIT compiles the iteration using JAX for better performance.
     """
     dc_du_prev, dc_dv_prev = system.jacob_constr_blocks(state_prev)
@@ -554,6 +728,12 @@ def jitted_solve_projection_onto_manifold_quasi_newton(
     q_, i, norm_delta_q, error = system.quasi_newton_projection(
         q, x_obs_seq, partition, dc_du_prev, dc_dv_prev, chol_C_prev,
         chol_D_prev, convergence_tol, position_tol, divergence_tol, max_iters)
+    if state._call_counts is not None:
+        key = _cache_key_func(system, system.constr)
+        if key in state._call_counts:
+            state._call_counts[key] += i
+        else:
+            state._call_counts[key] = i
     if error < convergence_tol and norm_delta_q < position_tol:
         state.pos = convert_to_numpy_pytree(q_)
         state.mom = system.metric @ (state.pos - state_prev.pos) / dt
@@ -568,14 +748,65 @@ def jitted_solve_projection_onto_manifold_quasi_newton(
             f'Last |c|={error:.1e}, |δq|={norm_delta_q}.')
 
 
+def jitted_solve_projection_onto_manifold_newton(
+        state, state_prev, dt, system,
+        convergence_tol=1e-8, position_tol=1e-8,
+        divergence_tol=1e10, max_iters=50, norm=maximum_norm):
+    """Newton solver for projecting points onto manifold.
+
+    Solves an equation of the form `r(λ) = c(q_ + M⁻¹ ∂c(q)ᵀλ) = 0` for the
+    vector of Lagrange multipliers `λ` to project a point `q_` on to the
+    manifold defined by the zero level set of `c`, with the projection performed
+    with in the linear subspace defined by the rows of the Jacobian matrix
+    `∂c(q)` evaluated at a previous point on the manifold `q`.
+
+    The Jacobian of the residual function `r` is
+
+        ∂r(λ) = ∂c(q_ + M⁻¹ ∂c(q)ᵀλ) M⁻¹ ∂c(q)ᵀ
+
+    such that the Newton update is
+
+        λ = λ - ∂r(λ)⁻¹ r(λ)
+
+    which requires evaluating `∂c` on each iteration.
+
+    Compared to the inbuilt solver in `mici.solvers` this version exploits the
+    structure in the constraint Jacobian `∂c` for conditioned diffusion systems
+    and JIT compiles the iteration using JAX for better performance.
+    """
+    dc_du_prev, dc_dv_prev = system.jacob_constr_blocks(state_prev)
+    q, x_obs_seq, partition = state.pos, state.x_obs_seq, state.partition
+    q_, i, norm_delta_q, error = system.newton_projection(
+        q, x_obs_seq, partition, dc_du_prev, dc_dv_prev, 
+        convergence_tol, position_tol, divergence_tol, max_iters)
+    if state._call_counts is not None:
+        key = _cache_key_func(system, system.constr)
+        if key in state._call_counts:
+            state._call_counts[key] += i
+        else:
+            state._call_counts[key] = i
+    if error < convergence_tol and norm_delta_q < position_tol:
+        state.pos = convert_to_numpy_pytree(q_)
+        state.mom = system.metric @ (state.pos - state_prev.pos) / dt
+        return state
+    elif error > divergence_tol or np.isnan(error):
+        raise ConvergenceError(
+            f'Newton iteration diverged on iteration {i}. '
+            f'Last |c|={error:.1e}, |δq|={norm_delta_q}.')
+    else:
+        raise ConvergenceError(
+            f'Newton iteration did not converge. '
+            f'Last |c|={error:.1e}, |δq|={norm_delta_q}.')
+
+
 def get_initial_state(system, rng, generate_x_obs_seq_init, dim_q, tol,
                       adam_step_size=2e-1, reg_coeff=5e-2, coarse_tol=1e-1,
-                      max_iters=1000, max_num_tries=10):
+                      max_iters=1000, max_num_tries=10, use_newton=True):
     """Find an initial constraint satisying state.
 
     Uses a heuristic combination of gradient-based minimisation of the norm
     of a modified constraint function plus a subsequent projection step using a
-    quasi-Newton method, to try to find an initial point `q` such that
+    (quasi-)Newton method, to try to find an initial point `q` such that
     `max(abs(constr(q)) < tol`.
     """
 
@@ -590,6 +821,10 @@ def get_initial_state(system, rng, generate_x_obs_seq_init, dim_q, tol,
             q, x_obs_seq_init, reg_coeff)
         opt_state = opt_update(i, grad, opt_state)
         return opt_state, obj, constr
+
+    projection_solver = (
+        jitted_solve_projection_onto_manifold_newton if use_newton else
+        jitted_solve_projection_onto_manifold_quasi_newton)
 
     for t in range(max_num_tries):
         logging.info(f'Starting try {t+1}')
@@ -606,10 +841,9 @@ def get_initial_state(system, rng, generate_x_obs_seq_init, dim_q, tol,
                 logging.info('Within coarse_tol attempting projection.')
                 q_init, = get_params(opt_state)
                 state = ConditionedDiffusionHamiltonianState(
-                    q_init, x_obs_seq=x_obs_seq_init)
+                    q_init, x_obs_seq=x_obs_seq_init, _call_counts={})
                 try:
-                    state = jitted_solve_projection_onto_manifold_quasi_newton(
-                        state, state, 1., system, tol)
+                    state = projection_solver(state, state, 1., system, tol)
                 except ConvergenceError:
                     logger.info('Quasi-Newton iteration diverged.')
                 if np.max(np.abs(system.constr(state))) < tol:

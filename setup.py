@@ -10,11 +10,11 @@ setup(
     packages=['sde'],
     python_requires='>=3.6',
     install_requires=[
-        'mici>=0.1.5',  'numpy>=1.15', 'scipy>=1.1',
+        'mici>=0.1.8',  'numpy>=1.17', 'scipy>=1.1',
         'jax>=0.1.55', 'jaxlib>=0.1.37'],
     extras_require={
         'notebook':  [
-            'symnum>=0.1.0', 'sympy>=1.4', 'matplotlib>=3.1', 'jupyter>=1.0',
+            'symnum>=0.1.1', 'sympy>=1.4', 'matplotlib>=3.1', 'jupyter>=1.0',
             'arviz>=0.5', 'corner>=2.0']
     }
 )
