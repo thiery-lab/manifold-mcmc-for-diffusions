@@ -8,7 +8,8 @@ import jax.experimental.optimizers as opt
 from mici.systems import (
     EuclideanMetricSystem, cache_in_state, cache_in_state_with_aux)
 from mici.matrices import (
-    SymmetricBlockDiagonalMatrix, IdentityMatrix, PositiveDiagonalMatrix)
+    PositiveDefiniteBlockDiagonalMatrix, IdentityMatrix, PositiveDiagonalMatrix,
+    PositiveScaledIdentityMatrix)
 from mici.transitions import Transition
 from mici.states import ChainState, _cache_key_func
 from mici.solvers import maximum_norm
@@ -22,9 +23,9 @@ def split(v, lengths):
     """Split an array along first dimension into slices of specified lengths."""
     i = 0
     parts = []
-    for l in lengths:
-        parts.append(v[i:i+l])
-        i += l
+    for j in lengths:
+        parts.append(v[i:i+j])
+        i += j
     if i < len(v):
         parts.append(v[i:])
     return parts
@@ -54,7 +55,6 @@ def convert_to_numpy_pytree(jax_pytree):
         return {k: convert_to_numpy_pytree(v) for k, v in jax_pytree.items()}
     else:
         raise ValueError(f'Unknown jax_pytree node type {type(jax_pytree)}')
-    return wrapper
 
 
 class ConditionedDiffusionConstrainedSystem(EuclideanMetricSystem):
@@ -62,7 +62,7 @@ class ConditionedDiffusionConstrainedSystem(EuclideanMetricSystem):
 
     def __init__(self, obs_interval, num_steps_per_obs, num_obs_per_subseq,
                  y_seq, dim_z, dim_x, dim_v, forward_func, generate_x_0,
-                 generate_z, obs_func, metric=None):
+                 generate_z, obs_func, metric=None, dim_v_0=None):
         """
         Args:
             obs_interval (float): Interobservation time interval.
@@ -102,16 +102,22 @@ class ConditionedDiffusionConstrainedSystem(EuclideanMetricSystem):
                 the latter case the matrix having two blocks on the diagonal,
                 the left most of size `dim_z x dim_z`, and the rightmost being
                 positive diagonal. Defaults to `mici.matrices.IdentityMatrix`.
+            dim_v_0 (int): Dimension of vector used to generate initial state.
+                Defaults to `dim_x` if `None`.
         """
 
         if metric is None or isinstance(metric, IdentityMatrix):
-            metric_1 = np.eye(dim_z)
-            log_det_sqrt_metric_1 = 0
-        elif (isinstance(metric, SymmetricBlockDiagonalMatrix) and
-                isinstance(metric.blocks[1], PositiveDiagonalMatrix)):
-            metric_1 = metric.blocks[0].array
-            log_det_sqrt_metric_1 = metric.blocks[0].log_abs_det_sqrt
-            metric_2_diag = metric.blocks[1].diagonal
+            metric_0 = np.eye(dim_z)
+            metric_0_inv = metric_0
+            log_det_sqrt_metric_0 = 0
+        elif (isinstance(metric, PositiveDefiniteBlockDiagonalMatrix) and
+                isinstance(metric.blocks[1],
+                          (PositiveDiagonalMatrix, IdentityMatrix,
+                           PositiveScaledIdentityMatrix))):
+            metric_0 = metric.blocks[0].array
+            metric_0_inv = metric.blocks[0].inv.array
+            log_det_sqrt_metric_0 = metric.blocks[0].log_abs_det / 2
+            metric_1_diag = metric.blocks[1].diagonal
         else:
             raise NotImplementedError(
                 'Only identity and block diagonal metrics with diagonal lower '
@@ -119,7 +125,6 @@ class ConditionedDiffusionConstrainedSystem(EuclideanMetricSystem):
 
         num_obs, dim_y = y_seq.shape
         δ = obs_interval / num_steps_per_obs
-        dim_q = dim_z + dim_x + num_obs * dim_v * num_steps_per_obs
         if num_obs % num_obs_per_subseq != 0:
             raise NotImplementedError(
                  'Only cases where num_obs_per_subseq is a factor of num_obs '
@@ -132,6 +137,7 @@ class ConditionedDiffusionConstrainedSystem(EuclideanMetricSystem):
             y_seq, (num_obs_per_subseq // 2, num_obs - num_obs_per_subseq))
         y_subseqs_p1[1] = np.reshape(
             y_subseqs_p1[1], (num_subseq - 1, num_obs_per_subseq, dim_y))
+        dim_v_0 = dim_x if dim_v_0 is None else dim_v_0
 
         super().__init__(
             neg_log_dens=standard_normal_neg_log_dens,
@@ -144,7 +150,7 @@ class ConditionedDiffusionConstrainedSystem(EuclideanMetricSystem):
 
         @api.jit
         def generate_x_obs_seq(q):
-            u, v_0, v_seq_flat = split(q, (dim_z, dim_x))
+            u, v_0, v_seq_flat = split(q, (dim_z, dim_v_0))
             z = generate_z(u)
             x_0 = generate_x_0(z, v_0)
             v_seq = np.reshape(v_seq_flat, (-1, dim_v))
@@ -211,7 +217,7 @@ class ConditionedDiffusionConstrainedSystem(EuclideanMetricSystem):
         @api.partial(api.jit, static_argnums=(2,))
         def constr(q, x_obs_seq, partition=0):
             """Calculate constraint function for current partition."""
-            u, v_0, v_seq_flat = split(q, (dim_z, dim_x,))
+            u, v_0, v_seq_flat = split(q, (dim_z, dim_v_0,))
             v_seq = v_seq_flat.reshape((-1, dim_v))
             z = generate_z(u)
             (v_subseqs, w_inits, y_bars) = partition_into_subseqs(
@@ -230,7 +236,7 @@ class ConditionedDiffusionConstrainedSystem(EuclideanMetricSystem):
         @api.jit
         def init_objective(q, x_obs_seq, reg_coeff):
             """Optimisation objective to find initial state on manifold."""
-            u, v_0, v_seq_flat = split(q, (dim_z, dim_x,))
+            u, v_0, v_seq_flat = split(q, (dim_z, dim_v_0,))
             v_subseqs = v_seq_flat.reshape((num_obs, num_steps_per_obs, dim_v))
             z = generate_z(u)
             x_0 = generate_x_0(z, v_0)
@@ -268,11 +274,11 @@ class ConditionedDiffusionConstrainedSystem(EuclideanMetricSystem):
             def g_y_bar(u, v, w_0, b):
                 z = generate_z(u)
                 if b == 0:
-                    w_0, v = split(v, (dim_x,))
+                    w_0, v = split(v, (dim_v_0,))
                 v_seq = np.reshape(v, (-1, dim_v))
                 return generate_y_bar(z, w_0, v_seq, b)
 
-            u, v_0, v_seq_flat = split(q, (dim_z, dim_x,))
+            u, v_0, v_seq_flat = split(q, (dim_z, dim_v_0,))
             v_seq = np.reshape(v_seq_flat, (-1, dim_v))
             (v_subseqs, w_inits, _) = partition_into_subseqs(
                  v_seq, v_0, x_obs_seq, partition)
@@ -293,9 +299,9 @@ class ConditionedDiffusionConstrainedSystem(EuclideanMetricSystem):
         @api.jit
         def chol_gram_blocks(dc_du, dc_dv):
             """Calculate Cholesky factors of decomposition of ∂c(q) M⁻¹ ∂c(q)ᵀ.
-            
+
             The constraint Jacobian decomposes as
-            
+
                 ∂c([u, v]) = [∂₀c̅(u, v), ∂₁c̅(u, v)]
 
             where c̅(u, v) = c([u, v]) and ∂₀c̅(u, v) is a dense tall
@@ -311,9 +317,9 @@ class ConditionedDiffusionConstrainedSystem(EuclideanMetricSystem):
                 ∂₀c̅(u, v) M₀⁻¹ ∂₀c̅(u, v)ᵀ + ∂₁c̅(u, v) M₁⁻¹ ∂₁c̅(u, v)ᵀ
 
             denoting
-            
+
                 D(u, v) = ∂₁c̅(u, v) M₁⁻¹ ∂₁c̅(u, v)ᵀ
-                
+
             with D square block diagonal and positive definite and
 
                 C(u, v) = M₀ + ∂₀c̅(u, v)ᵀ D(u, v)⁻¹ ∂₀c̅(u, v)
@@ -331,7 +337,7 @@ class ConditionedDiffusionConstrainedSystem(EuclideanMetricSystem):
                           for i in range(3))
             else:
                 m_v = split(
-                    metric_2_diag, (dc_dv[0].shape[1],
+                    metric_1_diag, (dc_dv[0].shape[1],
                                     dc_dv[1].shape[0] * dc_dv[1].shape[2]))
                 m_v[1] = m_v[1].reshape((dc_dv[1].shape[0], dc_dv[1].shape[2]))
                 D = tuple(np.einsum('...ij,...kj',
@@ -341,7 +347,7 @@ class ConditionedDiffusionConstrainedSystem(EuclideanMetricSystem):
             D_inv_dc_du = tuple(
                 sla.cho_solve((chol_D[i], True), dc_du[i]) for i in range(3))
             chol_C = nla.cholesky(
-                metric_1 +
+                metric_0 +
                 (dc_du[0].T @ D_inv_dc_du[0] +
                  np.einsum('ijk,ijl->kl', dc_du[1], D_inv_dc_du[1]) +
                  dc_du[2].T @ D_inv_dc_du[2]))
@@ -391,7 +397,7 @@ class ConditionedDiffusionConstrainedSystem(EuclideanMetricSystem):
                           for i in range(3))
             else:
                 m_v = split(
-                    metric_2_diag, (dc_dv_l[0].shape[1],
+                    metric_1_diag, (dc_dv_l[0].shape[1],
                                     dc_dv_l[1].shape[0] * dc_dv_l[1].shape[2]))
                 m_v[1] = m_v[1].reshape(
                     (dc_dv_l[1].shape[0], dc_dv_l[1].shape[2]))
@@ -403,7 +409,7 @@ class ConditionedDiffusionConstrainedSystem(EuclideanMetricSystem):
             D_inv_dc_du_l = tuple(
                 sla.lu_solve(lu_and_piv_D[i], dc_du_l[i]) for i in range(3))
             lu_and_piv_C = sla.lu_factor(
-                metric_1 +
+                metric_0 +
                 (dc_du_r[0].T @ D_inv_dc_du_l[0] +
                  np.einsum('ijk,ijl->kl', dc_du_r[1], D_inv_dc_du_l[1]) +
                  dc_du_r[2].T @ D_inv_dc_du_l[2]))
@@ -415,7 +421,7 @@ class ConditionedDiffusionConstrainedSystem(EuclideanMetricSystem):
             return (
                 sum(np.log(np.abs(chol_D[i].diagonal(0, -2, -1))).sum()
                     for i in range(3)) +
-                np.log(np.abs(chol_C.diagonal())).sum() - log_det_sqrt_metric_1
+                np.log(np.abs(chol_C.diagonal())).sum() - log_det_sqrt_metric_0
             )
 
         @api.partial(api.jit, static_argnums=(2,))
@@ -484,7 +490,7 @@ class ConditionedDiffusionConstrainedSystem(EuclideanMetricSystem):
                 vct):
             """Left-multiply vector by inverse of Jacobian product matrix."""
             vct_parts = split(
-                vct, (dc_du_l[0].shape[0], 
+                vct, (dc_du_l[0].shape[0],
                       dc_du_l[1].shape[0] * dc_du_l[1].shape[1]))
             vct_parts[1] = np.reshape(vct_parts[1], dc_du_l[1].shape[:2])
             D_inv_vct = [sla.lu_solve(lu_and_piv_D[i], vct_parts[i])
@@ -519,18 +525,26 @@ class ConditionedDiffusionConstrainedSystem(EuclideanMetricSystem):
                 max_iters):
 
             def body_func(val):
-                q, i, _, _ = val
+                q, mu, i, _, _ = val
                 c = constr(q, x_obs_seq, partition)
                 error = norm(c)
-                delta_q = rmult_by_jacob_constr(
+                delta_mu = rmult_by_jacob_constr(
                     dc_du_prev, dc_dv_prev, lmult_by_inv_gram(
                         dc_du_prev, dc_dv_prev, chol_C_prev, chol_D_prev, c))
+                if not isinstance(metric, IdentityMatrix):
+                    delta_q = np.concatenate([
+                        metric_0_inv @ delta_mu[:dim_z],
+                        delta_mu[dim_z:] / metric_1_diag
+                    ])
+                else:
+                    delta_q = delta_mu
+                mu += delta_mu
                 q -= delta_q
                 i += 1
-                return q, i, norm(delta_q), error
+                return q, mu, i, norm(delta_q), error
 
             def cond_func(val):
-                _, i, norm_delta_q, error, = val
+                _, _, i, norm_delta_q, error, = val
                 diverged = np.logical_or(
                     error > divergence_tol, np.isnan(error))
                 converged = np.logical_and(
@@ -538,7 +552,8 @@ class ConditionedDiffusionConstrainedSystem(EuclideanMetricSystem):
                 return np.logical_not(np.logical_or(
                     (i >= max_iters), np.logical_or(diverged, converged)))
 
-            return lax.while_loop(cond_func, body_func, (q, 0, np.inf, -1.))
+            return lax.while_loop(cond_func, body_func,
+                                  (q, np.zeros_like(q), 0, np.inf, -1.))
 
         @api.partial(api.jit, static_argnums=(2, 5, 6, 7, 8))
         def newton_projection(
@@ -546,22 +561,30 @@ class ConditionedDiffusionConstrainedSystem(EuclideanMetricSystem):
                 convergence_tol, position_tol, divergence_tol, max_iters):
 
             def body_func(val):
-                q, i, _, _ = val
+                q, mu, i, _, _ = val
                 c = constr(q, x_obs_seq, partition)
                 dc_du, dc_dv = jacob_constr_blocks(q, x_obs_seq, partition)
                 lu_and_piv_C, lu_and_piv_D = lu_jacob_product_blocks(
                     dc_du, dc_dv, dc_du_prev, dc_dv_prev)
                 error = norm(c)
-                delta_q = rmult_by_jacob_constr(
+                delta_mu = rmult_by_jacob_constr(
                     dc_du_prev, dc_dv_prev, lmult_by_inv_jacob_product(
                         dc_du, dc_dv, dc_du_prev, dc_dv_prev, lu_and_piv_C,
                         lu_and_piv_D, c))
+                if not isinstance(metric, IdentityMatrix):
+                    delta_q = np.concatenate([
+                        metric_0_inv @ delta_mu[:dim_z],
+                        delta_mu[dim_z:] / metric_1_diag
+                    ])
+                else:
+                    delta_q = delta_mu
+                mu += delta_mu
                 q -= delta_q
                 i += 1
-                return q, i, norm(delta_q), error
+                return q, mu, i, norm(delta_q), error
 
             def cond_func(val):
-                _, i, norm_delta_q, error, = val
+                _, _, i, norm_delta_q, error, = val
                 diverged = np.logical_or(
                     error > divergence_tol, np.isnan(error))
                 converged = np.logical_and(
@@ -569,7 +592,8 @@ class ConditionedDiffusionConstrainedSystem(EuclideanMetricSystem):
                 return np.logical_not(np.logical_or(
                     (i >= max_iters), np.logical_or(diverged, converged)))
 
-            return lax.while_loop(cond_func, body_func, (q, 0, np.inf, -1.))
+            return lax.while_loop(cond_func, body_func, 
+                                  (q, np.zeros_like(q), 0, np.inf, -1.))
 
         self._generate_x_obs_seq = generate_x_obs_seq
         self._constr = constr
@@ -725,7 +749,7 @@ def jitted_solve_projection_onto_manifold_quasi_newton(
     dc_du_prev, dc_dv_prev = system.jacob_constr_blocks(state_prev)
     chol_C_prev, chol_D_prev = system.chol_gram_blocks(state_prev)
     q, x_obs_seq, partition = state.pos, state.x_obs_seq, state.partition
-    q_, i, norm_delta_q, error = system.quasi_newton_projection(
+    q_, mu, i, norm_delta_q, error = system.quasi_newton_projection(
         q, x_obs_seq, partition, dc_du_prev, dc_dv_prev, chol_C_prev,
         chol_D_prev, convergence_tol, position_tol, divergence_tol, max_iters)
     if state._call_counts is not None:
@@ -735,8 +759,9 @@ def jitted_solve_projection_onto_manifold_quasi_newton(
         else:
             state._call_counts[key] = i
     if error < convergence_tol and norm_delta_q < position_tol:
-        state.pos = convert_to_numpy_pytree(q_)
-        state.mom = system.metric @ (state.pos - state_prev.pos) / dt
+        state.pos = onp.asarray(q_)
+        if state.mom is not None:
+            state.mom -= onp.asarray(mu) / dt
         return state
     elif error > divergence_tol or np.isnan(error):
         raise ConvergenceError(
@@ -776,8 +801,8 @@ def jitted_solve_projection_onto_manifold_newton(
     """
     dc_du_prev, dc_dv_prev = system.jacob_constr_blocks(state_prev)
     q, x_obs_seq, partition = state.pos, state.x_obs_seq, state.partition
-    q_, i, norm_delta_q, error = system.newton_projection(
-        q, x_obs_seq, partition, dc_du_prev, dc_dv_prev, 
+    q_, mu, i, norm_delta_q, error = system.newton_projection(
+        q, x_obs_seq, partition, dc_du_prev, dc_dv_prev,
         convergence_tol, position_tol, divergence_tol, max_iters)
     if state._call_counts is not None:
         key = _cache_key_func(system, system.constr)
@@ -786,8 +811,9 @@ def jitted_solve_projection_onto_manifold_newton(
         else:
             state._call_counts[key] = i
     if error < convergence_tol and norm_delta_q < position_tol:
-        state.pos = convert_to_numpy_pytree(q_)
-        state.mom = system.metric @ (state.pos - state_prev.pos) / dt
+        state.pos = onp.asarray(q_)
+        if state.mom is not None:
+            state.mom -= onp.asarray(mu) / dt
         return state
     elif error > divergence_tol or np.isnan(error):
         raise ConvergenceError(
