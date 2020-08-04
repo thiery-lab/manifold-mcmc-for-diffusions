@@ -79,6 +79,7 @@ class ConditionedDiffusionConstrainedSystem(System):
         generate_x_0,
         generate_z,
         obs_func,
+        obs_noise_std=0,
         use_gaussian_splitting=False,
         metric=None,
         dim_v_0=None,
@@ -116,6 +117,10 @@ class ConditionedDiffusionConstrainedSystem(System):
             obs_func (Callable[[array], array]): Function mapping from state
                 vector `x` at an observation time to the corresponding observed
                 vector `y = obs_func(x)`.
+            obs_noise_std (float): Standard-deviation of independent and zero-mean
+                Gaussian noise added to observations. If equal to zero (the default)
+                noiseless observations will be assumed (with the resulting latent
+                state not including a component for the observation noise).
             use_gaussian_splitting (bool): Whether to use Gaussian specific splitting
                     h₁(q) = ½log(∂c(q)ᵀ∂c(q)), h₂(q, p) = ½qᵀq + ½pᵀp
                 Or the more standard splitting
@@ -182,12 +187,18 @@ class ConditionedDiffusionConstrainedSystem(System):
         y_subseqs_p1[1] = np.reshape(
             y_subseqs_p1[1], (num_subseq - 1, num_obs_per_subseq, dim_y)
         )
+        noisy_observations = obs_noise_std > 0
+        dim_y = y_seq.shape[-1]
         dim_v_0 = dim_x if dim_v_0 is None else dim_v_0
-
         self.dim_u = dim_u
         self.dim_v = dim_v
         self.dim_v_0 = dim_v_0
-        self.dim_q = dim_u + dim_v_0 + dim_v * num_obs * num_steps_per_obs
+        self.dim_q = (
+            dim_u
+            + dim_v_0
+            + dim_v * num_obs * num_steps_per_obs
+            + (num_obs * dim_y if noisy_observations else 0)
+        )
         self.num_steps_per_obs = num_steps_per_obs
         self.generate_x_0 = generate_x_0
         self.generate_z = generate_z
@@ -209,39 +220,50 @@ class ConditionedDiffusionConstrainedSystem(System):
             _, x_seq = lax.scan(lambda x, v: step_func(z, x, v), x_0, v_seq)
             return x_seq[obs_indices]
 
-        def generate_y_bar(z, w_0, v_seq, b):
+        def generate_y_bar(z, w_0, v_seq, n, b):
             """Generate partial observation subsequence."""
             x_0 = generate_x_0(z, w_0) if b == 0 else w_0
             _, x_seq = lax.scan(lambda x, v: step_func(z, x, v), x_0, v_seq)
             y_seq = obs_func(x_seq[obs_indices])
-            return (
-                y_seq.flatten()
-                if b == 2
-                else np.concatenate((y_seq[:-1].flatten(), x_seq[-1]))
-            )
+            if noisy_observations:
+                y_seq = y_seq + obs_noise_std * n
+            if b == 2:
+                return y_seq.flatten()
+            elif noisy_observations:
+                return np.concatenate((y_seq.flatten(), x_seq[-1]))
+            else:
+                return np.concatenate((y_seq[:-1].flatten(), x_seq[-1]))
 
-        @api.partial(api.jit, static_argnums=(3,))
-        def partition_into_subseqs(v_seq, v_0, x_obs_seq, partition=0):
+        @api.partial(api.jit, static_argnums=(4,))
+        def partition_into_subseqs(v_seq, v_0, n, x_obs_seq, partition=0):
             """Partition noise increment and observation sequences.
 
             Partitition sequences in to either `num_subseq` equally sized
             subsequences (`partition == 0`)  or `num_subseq - 1` equally sized
             subsequences plus initial and final 'half' subsequences.
             """
+            slice_end = None if noisy_observations else -1
             if partition == 0:
                 v_subseqs = v_seq.reshape((num_subseq, num_step_per_subseq, dim_v))
                 v_subseqs = (v_subseqs[0], v_subseqs[1:-1], v_subseqs[-1])
+                if noisy_observations:
+                    n_subseqs = n.reshape((num_subseq, num_obs_per_subseq, dim_y))
+                    n_subseqs = (n_subseqs[0], n_subseqs[1:-1], n_subseqs[-1])
+                else:
+                    n_subseqs = (None,) * 3
                 x_obs_subseqs = x_obs_seq.reshape(
                     (num_subseq, num_obs_per_subseq, dim_x)
                 )
                 w_inits = (v_0, x_obs_subseqs[:-2, -1], x_obs_subseqs[-2, -1])
                 y_bars = (
                     np.concatenate(
-                        (y_subseqs_p0[0, :-1].flatten(), x_obs_subseqs[0, -1])
+                        (y_subseqs_p0[0, :slice_end].flatten(), x_obs_subseqs[0, -1])
                     ),
                     np.concatenate(
                         (
-                            y_subseqs_p0[1:-1, :-1].reshape((num_subseq - 2, -1)),
+                            y_subseqs_p0[1:-1, :slice_end].reshape(
+                                (num_subseq - 2, -1)
+                            ),
                             x_obs_subseqs[1:-1, -1],
                         ),
                         -1,
@@ -259,6 +281,19 @@ class ConditionedDiffusionConstrainedSystem(System):
                 v_subseqs[1] = v_subseqs[1].reshape(
                     (num_subseq - 1, num_step_per_subseq, dim_v)
                 )
+                if noisy_observations:
+                    n_subseqs = split(
+                        n,
+                        (
+                            (num_obs_per_subseq // 2),
+                            num_obs_per_subseq * (num_subseq - 1),
+                        ),
+                    )
+                    n_subseqs[1] = n_subseqs[1].reshape(
+                        (num_subseq - 1, num_obs_per_subseq, dim_y)
+                    )
+                else:
+                    n_subseqs = (None,) * 3
                 x_obs_subseqs = split(
                     x_obs_seq, (num_obs_per_subseq // 2, num_obs - num_obs_per_subseq)
                 )
@@ -274,36 +309,51 @@ class ConditionedDiffusionConstrainedSystem(System):
                 )
                 y_bars = (
                     np.concatenate(
-                        (y_subseqs_p1[0][:-1].flatten(), x_obs_subseqs[0][-1])
+                        (y_subseqs_p1[0][:slice_end].flatten(), x_obs_subseqs[0][-1])
                     ),
                     np.concatenate(
                         (
-                            y_subseqs_p1[1][:, :-1].reshape((num_subseq - 1, -1)),
+                            y_subseqs_p1[1][:, :slice_end].reshape(
+                                (num_subseq - 1, -1)
+                            ),
                             x_obs_subseqs[1][:, -1],
                         ),
                         -1,
                     ),
                     y_subseqs_p1[2].flatten(),
                 )
-            return v_subseqs, w_inits, y_bars
+            return v_subseqs, n_subseqs, w_inits, y_bars
 
         @api.partial(api.jit, static_argnums=(2,))
         def constr(q, x_obs_seq, partition=0):
             """Calculate constraint function for current partition."""
-            u, v_0, v_seq_flat = split(q, (dim_u, dim_v_0,))
+            if noisy_observations:
+                u, v_0, v_seq_flat, n_flat = split(
+                    q, (dim_u, dim_v_0, num_obs * dim_v * num_steps_per_obs, num_obs)
+                )
+                n = n_flat.reshape((-1, dim_y))
+            else:
+                u, v_0, v_seq_flat = split(q, (dim_u, dim_v_0,))
+                n = None
             v_seq = v_seq_flat.reshape((-1, dim_v))
             z = generate_z(u)
-            (v_subseqs, w_inits, y_bars) = partition_into_subseqs(
-                v_seq, v_0, x_obs_seq, partition
+            (v_subseqs, n_subseqs, w_inits, y_bars) = partition_into_subseqs(
+                v_seq, v_0, n, x_obs_seq, partition
             )
             gen_funcs = (
                 generate_y_bar,
-                api.vmap(generate_y_bar, (None, 0, 0, None)),
+                api.vmap(
+                    generate_y_bar,
+                    (None, 0, 0, 0 if noisy_observations else None, None),
+                ),
                 generate_y_bar,
             )
             return np.concatenate(
                 [
-                    (gen_funcs[b](z, w_inits[b], v_subseqs[b], b) - y_bars[b]).flatten()
+                    (
+                        gen_funcs[b](z, w_inits[b], v_subseqs[b], n_subseqs[b], b)
+                        - y_bars[b]
+                    ).flatten()
                     for b in range(3)
                 ]
             )
@@ -350,31 +400,45 @@ class ConditionedDiffusionConstrainedSystem(System):
             where `∂₁c₁(u, v₁)` is itself block diagonal.
             """
 
-            def g_y_bar(u, v, w_0, b):
+            def g_y_bar(u, v, w_0, n, b):
                 z = generate_z(u)
                 if b == 0:
-                    w_0, v = split(v, (dim_v_0,))
-                v_seq = np.reshape(v, (-1, dim_v))
-                return generate_y_bar(z, w_0, v_seq, b)
+                    w_0, v = split(v, (dim_x,))
+                v_seq = v.reshape((-1, dim_v))
+                return generate_y_bar(z, w_0, v_seq, n, b)
 
-            u, v_0, v_seq_flat = split(q, (dim_u, dim_v_0,))
-            v_seq = np.reshape(v_seq_flat, (-1, dim_v))
-            (v_subseqs, w_inits, _) = partition_into_subseqs(
-                v_seq, v_0, x_obs_seq, partition
+            if noisy_observations:
+                u, v_0, v_seq_flat, n_flat = split(
+                    q, (dim_u, dim_v_0, num_obs * dim_v * num_steps_per_obs, num_obs)
+                )
+                n = n_flat.reshape((-1, dim_y))
+            else:
+                u, v_0, v_seq_flat = split(q, (dim_u, dim_v_0,))
+                n = None
+            v_seq = v_seq_flat.reshape((-1, dim_v))
+            (v_subseqs, n_subseqs, w_inits, _) = partition_into_subseqs(
+                v_seq, v_0, n, x_obs_seq, partition
             )
             v_bars = (
                 np.concatenate([v_0, v_subseqs[0].flatten()]),
-                np.reshape(v_subseqs[1], (v_subseqs[1].shape[0], -1)),
+                v_subseqs[1].reshape((v_subseqs[1].shape[0], -1)),
                 v_subseqs[2].flatten(),
             )
             jac_g_y_bar = api.jacrev(g_y_bar, (0, 1))
             jacob_funcs = (
                 jac_g_y_bar,
-                api.vmap(jac_g_y_bar, (None, 0, 0, None)),
+                api.vmap(
+                    jac_g_y_bar, (None, 0, 0, 0 if noisy_observations else None, None)
+                ),
                 jac_g_y_bar,
             )
             return tuple(
-                zip(*[jacob_funcs[b](u, v_bars[b], w_inits[b], b) for b in range(3)])
+                zip(
+                    *(
+                        jacob_funcs[b](u, v_bars[b], w_inits[b], n_subseqs[b], b)
+                        for b in range(3)
+                    )
+                )
             )
 
         @api.jit
@@ -515,10 +579,34 @@ class ConditionedDiffusionConstrainedSystem(System):
                     dc_dv_l_blocks[i] / M_1_diag_blocks[i][..., None, :]
                     for i in range(3)
                 )
-            return tuple(
+            D_blocks = [
                 np.einsum("...ij,...kj", dc_dv_l_inv_M_1_blocks[i], dc_dv_r_blocks[i])
                 for i in range(3)
-            )
+            ]
+            if noisy_observations:
+                for i in range(3):
+                    diag_indices = np.diag_indices(D_blocks[i].shape[-2])
+                    if i == 2:
+                        D_blocks[i] = (
+                            D_blocks[i]
+                            .at[(...,) + diag_indices]
+                            .add(obs_noise_std ** 2)
+                        )
+                    else:
+                        D_blocks[i] = (
+                            D_blocks[i]
+                            .at[(...,) + diag_indices]
+                            .add(
+                                obs_noise_std ** 2
+                                * np.concatenate(
+                                    [
+                                        np.ones(D_blocks[i].shape[-1] - dim_x),
+                                        np.zeros(dim_x),
+                                    ]
+                                )
+                            )
+                        )
+            return D_blocks
 
         def get_M_0_matrix():
             if isinstance(metric, IdentityMatrix):
@@ -551,23 +639,49 @@ class ConditionedDiffusionConstrainedSystem(System):
         @api.jit
         def lmult_by_jacob_constr(dc_du_blocks, dc_dv_blocks, vct):
             """Left-multiply vector by constraint Jacobian matrix."""
-            vct_u, vct_v = split(vct, (dim_u,))
-            j0, j1, j2 = (
+            if noisy_observations:
+                vct_u, vct_v, vct_n = split(
+                    vct, (dim_u, dim_v_0 + num_obs * num_steps_per_obs * dim_v,)
+                )
+            else:
+                vct_u, vct_v = split(vct, (dim_u,))
+            n_block_1 = dc_dv_blocks[1].shape[0]
+            j0, j2 = (
                 dc_dv_blocks[0].shape[1],
-                dc_dv_blocks[1].shape[0],
                 dc_dv_blocks[2].shape[1],
             )
-            return np.vstack(
+            k0, k2 = (
+                dc_dv_blocks[0].shape[0] - dim_x,
+                dc_dv_blocks[2].shape[0],
+            )
+            jacob_vct = np.vstack(
                 (dc_du_blocks[0], dc_du_blocks[1].reshape((-1, dim_u)), dc_du_blocks[2])
             ) @ vct_u + np.concatenate(
                 (
                     dc_dv_blocks[0] @ vct_v[:j0],
                     np.einsum(
-                        "ijk,ik->ij", dc_dv_blocks[1], vct_v[j0:-j2].reshape((j1, -1))
+                        "ijk,ik->ij",
+                        dc_dv_blocks[1],
+                        vct_v[j0:-j2].reshape((n_block_1, -1)),
                     ).flatten(),
                     dc_dv_blocks[2] @ vct_v[-j2:],
                 )
             )
+            if noisy_observations:
+                jacob_vct += obs_noise_std * np.concatenate(
+                    [
+                        np.concatenate([vct_n[:k0], np.zeros(dim_x)]),
+                        np.concatenate(
+                            [
+                                vct_n[k0:-k2].reshape((n_block_1, -1)),
+                                np.zeros((n_block_1, dim_x)),
+                            ],
+                            1,
+                        ).flatten(),
+                        vct_n[-k2:],
+                    ]
+                )
+            return jacob_vct
 
         @api.jit
         def rmult_by_jacob_constr(dc_du_blocks, dc_dv_blocks, vct):
@@ -579,7 +693,7 @@ class ConditionedDiffusionConstrainedSystem(System):
                     dc_du_blocks[1].shape[0] * dc_du_blocks[1].shape[1],
                 ),
             )
-            vct_parts[1] = np.reshape(vct_parts[1], dc_du_blocks[1].shape[:2])
+            vct_parts[1] = vct_parts[1].reshape(dc_du_blocks[1].shape[:2])
             return np.concatenate(
                 [
                     vct_parts[0] @ dc_du_blocks[0]
@@ -589,6 +703,15 @@ class ConditionedDiffusionConstrainedSystem(System):
                     np.einsum("ij,ijk->ik", vct_parts[1], dc_dv_blocks[1]).flatten(),
                     vct_parts[2] @ dc_dv_blocks[2],
                 ]
+                + (
+                    [
+                        obs_noise_std * vct_parts[0][:-dim_x],
+                        obs_noise_std * vct_parts[1][:, :-dim_x].flatten(),
+                        obs_noise_std * vct_parts[2],
+                    ]
+                    if noisy_observations
+                    else []
+                )
             )
 
         @api.jit
