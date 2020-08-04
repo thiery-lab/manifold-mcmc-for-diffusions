@@ -378,7 +378,7 @@ class ConditionedDiffusionConstrainedSystem(System):
             )
 
         @api.jit
-        def chol_gram_blocks(dc_du, dc_dv):
+        def chol_gram_blocks(dc_du_blocks, dc_dv_blocks):
             """Calculate Cholesky factors of decomposition of `∂c(q) M⁻¹ ∂c(q)ᵀ`.
 
             The constraint Jacobian decomposes as
@@ -413,23 +413,26 @@ class ConditionedDiffusionConstrainedSystem(System):
             blocks of `D(u, v)` we can solve for systems in the Gram matrix.
             """
             M_0 = get_M_0_matrix()
-            D = compute_D_blocks(dc_dv, dc_dv)
-            chol_D = tuple(nla.cholesky(D[i]) for i in range(3))
-            D_inv_dc_du = tuple(
-                sla.cho_solve((chol_D[i], True), dc_du[i]) for i in range(3)
+            D_blocks = compute_D_blocks(dc_dv_blocks, dc_dv_blocks)
+            chol_D_blocks = tuple(nla.cholesky(D_blocks[i]) for i in range(3))
+            D_inv_dc_du_blocks = tuple(
+                sla.cho_solve((chol_D_blocks[i], True), dc_du_blocks[i])
+                for i in range(3)
             )
             chol_C = nla.cholesky(
                 M_0
                 + (
-                    dc_du[0].T @ D_inv_dc_du[0]
-                    + np.einsum("ijk,ijl->kl", dc_du[1], D_inv_dc_du[1])
-                    + dc_du[2].T @ D_inv_dc_du[2]
+                    dc_du_blocks[0].T @ D_inv_dc_du_blocks[0]
+                    + np.einsum("ijk,ijl->kl", dc_du_blocks[1], D_inv_dc_du_blocks[1])
+                    + dc_du_blocks[2].T @ D_inv_dc_du_blocks[2]
                 )
             )
-            return chol_C, chol_D
+            return chol_C, chol_D_blocks
 
         @api.jit
-        def lu_jacob_product_blocks(dc_du_l, dc_dv_l, dc_du_r, dc_dv_r):
+        def lu_jacob_product_blocks(
+            dc_du_l_blocks, dc_dv_l_blocks, dc_du_r_blocks, dc_dv_r_blocks
+        ):
             """Calculate LU factors of decomposition of ∂c(q) M⁻¹ ∂c(q')ᵀ
 
             The constraint Jacobian decomposes as
@@ -468,43 +471,52 @@ class ConditionedDiffusionConstrainedSystem(System):
             the blocks of D we can solve for systems in the Jacobian product.
             """
             M_0 = get_M_0_matrix()
-            D = compute_D_blocks(dc_dv_l, dc_dv_r)
-            lu_and_piv_D = tuple(sla.lu_factor(D[i]) for i in range(3))
-            D_inv_dc_du_l = tuple(
-                sla.lu_solve(lu_and_piv_D[i], dc_du_l[i]) for i in range(3)
+            D_blocks = compute_D_blocks(dc_dv_l_blocks, dc_dv_r_blocks)
+            lu_and_piv_D_blocks = tuple(sla.lu_factor(D_blocks[i]) for i in range(3))
+            D_inv_dc_du_l_blocks = tuple(
+                sla.lu_solve(lu_and_piv_D_blocks[i], dc_du_l_blocks[i])
+                for i in range(3)
             )
             lu_and_piv_C = sla.lu_factor(
                 M_0
                 + (
-                    dc_du_r[0].T @ D_inv_dc_du_l[0]
-                    + np.einsum("ijk,ijl->kl", dc_du_r[1], D_inv_dc_du_l[1])
-                    + dc_du_r[2].T @ D_inv_dc_du_l[2]
+                    dc_du_r_blocks[0].T @ D_inv_dc_du_l_blocks[0]
+                    + np.einsum(
+                        "ijk,ijl->kl", dc_du_r_blocks[1], D_inv_dc_du_l_blocks[1]
+                    )
+                    + dc_du_r_blocks[2].T @ D_inv_dc_du_l_blocks[2]
                 )
             )
-            return lu_and_piv_C, lu_and_piv_D
+            return lu_and_piv_C, lu_and_piv_D_blocks
 
-        def compute_D_blocks(dc_dv_l, dc_dv_r):
+        def compute_D_blocks(dc_dv_l_blocks, dc_dv_r_blocks):
             if isinstance(metric, IdentityMatrix) or isinstance(
                 metric.blocks[1], IdentityMatrix
             ):
-                dc_dv_l_inv_M_1 = dc_dv_l
+                dc_dv_l_inv_M_1_blocks = dc_dv_l_blocks
             elif isinstance(metric.blocks[1], PositiveScaledIdentityMatrix):
                 scalar = metric.blocks[1].scalar
-                dc_dv_l_inv_M_1 = tuple(dc_dv_l[i] / scalar for i in range(3))
+                dc_dv_l_inv_M_1_blocks = tuple(
+                    dc_dv_l_blocks[i] / scalar for i in range(3)
+                )
             else:
                 M_1_diag = metric.blocks[1].diagonal
-                M_1_diag = split(
+                M_1_diag_blocks = split(
                     M_1_diag,
-                    (dc_dv_l[0].shape[1], dc_dv_l[1].shape[0] * dc_dv_l[1].shape[2]),
+                    (
+                        dc_dv_l_blocks[0].shape[1],
+                        dc_dv_l_blocks[1].shape[0] * dc_dv_l_blocks[1].shape[2],
+                    ),
                 )
-                M_1_diag[1] = M_1_diag[1].reshape(
-                    (dc_dv_l[1].shape[0], dc_dv_l[1].shape[2])
+                M_1_diag_blocks[1] = M_1_diag_blocks[1].reshape(
+                    (dc_dv_l_blocks[1].shape[0], dc_dv_l_blocks[1].shape[2])
                 )
-                dc_dv_l_inv_M_1 = (
-                    dc_dv_l[i] / M_1_diag[i][..., None, :] for i in range(3)
+                dc_dv_l_inv_M_1_blocks = (
+                    dc_dv_l_blocks[i] / M_1_diag_blocks[i][..., None, :]
+                    for i in range(3)
                 )
             return tuple(
-                np.einsum("...ij,...kj", dc_dv_l_inv_M_1[i], dc_dv_r[i])
+                np.einsum("...ij,...kj", dc_dv_l_inv_M_1_blocks[i], dc_dv_r_blocks[i])
                 for i in range(3)
             )
 
@@ -515,11 +527,11 @@ class ConditionedDiffusionConstrainedSystem(System):
                 return metric.blocks[0].array
 
         @api.jit
-        def log_det_sqrt_gram_from_chol(chol_C, chol_D):
-            """Calculate log-det of Gram matrix from Cholesky factors."""
+        def log_det_sqrt_gram_from_chol(chol_C, chol_D_blocks):
+            """Calculate log-determinant of Gram matrix from block Cholesky factors."""
             return (
                 sum(
-                    np.log(np.abs(chol_D[i].diagonal(0, -2, -1))).sum()
+                    np.log(np.abs(chol_D_blocks[i].diagonal(0, -2, -1))).sum()
                     for i in range(3)
                 )
                 + np.log(np.abs(chol_C.diagonal())).sum()
@@ -529,67 +541,80 @@ class ConditionedDiffusionConstrainedSystem(System):
         @api.partial(api.jit, static_argnums=(2,))
         def log_det_sqrt_gram(q, x_obs_seq, partition=0):
             """Calculate log-determinant of constraint Jacobian Gram matrix."""
-            dc_du, dc_dv = jacob_constr_blocks(q, x_obs_seq, partition)
-            chol_C, chol_D = chol_gram_blocks(dc_du, dc_dv)
+            dc_du_blocks, dc_dv_blocks = jacob_constr_blocks(q, x_obs_seq, partition)
+            chol_C, chol_D_blocks = chol_gram_blocks(dc_du_blocks, dc_dv_blocks)
             return (
-                log_det_sqrt_gram_from_chol(chol_C, chol_D),
-                ((dc_du, dc_dv), (chol_C, chol_D)),
+                log_det_sqrt_gram_from_chol(chol_C, chol_D_blocks),
+                ((dc_du_blocks, dc_dv_blocks), (chol_C, chol_D_blocks)),
             )
 
         @api.jit
-        def lmult_by_jacob_constr(dc_du, dc_dv, vct):
+        def lmult_by_jacob_constr(dc_du_blocks, dc_dv_blocks, vct):
             """Left-multiply vector by constraint Jacobian matrix."""
             vct_u, vct_v = split(vct, (dim_u,))
-            j0, j1, j2 = dc_dv[0].shape[1], dc_dv[1].shape[0], dc_dv[2].shape[1]
+            j0, j1, j2 = (
+                dc_dv_blocks[0].shape[1],
+                dc_dv_blocks[1].shape[0],
+                dc_dv_blocks[2].shape[1],
+            )
             return np.vstack(
-                (dc_du[0], dc_du[1].reshape((-1, dim_u)), dc_du[2])
+                (dc_du_blocks[0], dc_du_blocks[1].reshape((-1, dim_u)), dc_du_blocks[2])
             ) @ vct_u + np.concatenate(
                 (
-                    dc_dv[0] @ vct_v[:j0],
+                    dc_dv_blocks[0] @ vct_v[:j0],
                     np.einsum(
-                        "ijk,ik->ij", dc_dv[1], np.reshape(vct_v[j0:-j2], (j1, -1))
+                        "ijk,ik->ij", dc_dv_blocks[1], vct_v[j0:-j2].reshape((j1, -1))
                     ).flatten(),
-                    dc_dv[2] @ vct_v[-j2:],
+                    dc_dv_blocks[2] @ vct_v[-j2:],
                 )
             )
 
         @api.jit
-        def rmult_by_jacob_constr(dc_du, dc_dv, vct):
+        def rmult_by_jacob_constr(dc_du_blocks, dc_dv_blocks, vct):
             """Right-multiply vector by constraint Jacobian matrix."""
             vct_parts = split(
-                vct, (dc_du[0].shape[0], dc_du[1].shape[0] * dc_du[1].shape[1])
+                vct,
+                (
+                    dc_du_blocks[0].shape[0],
+                    dc_du_blocks[1].shape[0] * dc_du_blocks[1].shape[1],
+                ),
             )
-            vct_parts[1] = np.reshape(vct_parts[1], dc_du[1].shape[:2])
+            vct_parts[1] = np.reshape(vct_parts[1], dc_du_blocks[1].shape[:2])
             return np.concatenate(
                 [
-                    vct_parts[0] @ dc_du[0]
-                    + np.einsum("ij,ijk->k", vct_parts[1], dc_du[1])
-                    + vct_parts[2] @ dc_du[2],
-                    vct_parts[0] @ dc_dv[0],
-                    np.einsum("ij,ijk->ik", vct_parts[1], dc_dv[1]).flatten(),
-                    vct_parts[2] @ dc_dv[2],
+                    vct_parts[0] @ dc_du_blocks[0]
+                    + np.einsum("ij,ijk->k", vct_parts[1], dc_du_blocks[1])
+                    + vct_parts[2] @ dc_du_blocks[2],
+                    vct_parts[0] @ dc_dv_blocks[0],
+                    np.einsum("ij,ijk->ik", vct_parts[1], dc_dv_blocks[1]).flatten(),
+                    vct_parts[2] @ dc_dv_blocks[2],
                 ]
             )
 
         @api.jit
-        def lmult_by_inv_gram(dc_du, dc_dv, chol_C, chol_D, vct):
+        def lmult_by_inv_gram(dc_du_blocks, dc_dv_blocks, chol_C, chol_D_blocks, vct):
             """Left-multiply vector by inverse Gram matrix."""
             vct_parts = split(
-                vct, (dc_du[0].shape[0], dc_du[1].shape[0] * dc_du[1].shape[1])
+                vct,
+                (
+                    dc_du_blocks[0].shape[0],
+                    dc_du_blocks[1].shape[0] * dc_du_blocks[1].shape[1],
+                ),
             )
-            vct_parts[1] = np.reshape(vct_parts[1], dc_du[1].shape[:2])
-            D_inv_vct = [
-                sla.cho_solve((chol_D[i], True), vct_parts[i]) for i in range(3)
-            ]
+            vct_parts[1] = np.reshape(vct_parts[1], dc_du_blocks[1].shape[:2])
+            D_inv_vct_blocks = tuple(
+                sla.cho_solve((chol_D_blocks[i], True), vct_parts[i]) for i in range(3)
+            )
             dc_du_T_D_inv_vct = sum(
-                np.einsum("...jk,...j->k", dc_du[i], D_inv_vct[i]) for i in range(3)
+                np.einsum("...jk,...j->k", dc_du_blocks[i], D_inv_vct_blocks[i])
+                for i in range(3)
             )
             C_inv_dc_du_T_D_inv_vct = sla.cho_solve((chol_C, True), dc_du_T_D_inv_vct)
             return np.concatenate(
                 [
                     sla.cho_solve(
-                        (chol_D[i], True),
-                        vct_parts[i] - dc_du[i] @ C_inv_dc_du_T_D_inv_vct,
+                        (chol_D_blocks[i], True),
+                        vct_parts[i] - dc_du_blocks[i] @ C_inv_dc_du_T_D_inv_vct,
                     ).flatten()
                     for i in range(3)
                 ]
@@ -597,40 +622,55 @@ class ConditionedDiffusionConstrainedSystem(System):
 
         @api.jit
         def lmult_by_inv_jacob_product(
-            dc_du_l, dc_dv_l, dc_du_r, dc_dv_r, lu_and_piv_C, lu_and_piv_D, vct
+            dc_du_l_blocks,
+            dc_dv_l_blocks,
+            dc_du_r_blocks,
+            dc_dv_r_blocks,
+            lu_and_piv_C,
+            lu_and_piv_D_blocks,
+            vct,
         ):
             """Left-multiply vector by inverse of Jacobian product matrix."""
             vct_parts = split(
-                vct, (dc_du_l[0].shape[0], dc_du_l[1].shape[0] * dc_du_l[1].shape[1])
+                vct,
+                (
+                    dc_du_l_blocks[0].shape[0],
+                    dc_du_l_blocks[1].shape[0] * dc_du_l_blocks[1].shape[1],
+                ),
             )
-            vct_parts[1] = np.reshape(vct_parts[1], dc_du_l[1].shape[:2])
-            D_inv_vct = [sla.lu_solve(lu_and_piv_D[i], vct_parts[i]) for i in range(3)]
+            vct_parts[1] = np.reshape(vct_parts[1], dc_du_l_blocks[1].shape[:2])
+            D_inv_vct_blocks = tuple(
+                sla.lu_solve(lu_and_piv_D_blocks[i], vct_parts[i]) for i in range(3)
+            )
             dc_du_r_T_D_inv_vct = sum(
-                np.einsum("...jk,...j->k", dc_du_r[i], D_inv_vct[i]) for i in range(3)
+                np.einsum("...jk,...j->k", dc_du_r_blocks[i], D_inv_vct_blocks[i])
+                for i in range(3)
             )
             C_inv_dc_du_r_T_D_inv_vct = sla.lu_solve(lu_and_piv_C, dc_du_r_T_D_inv_vct)
             return np.concatenate(
                 [
                     sla.lu_solve(
-                        lu_and_piv_D[i],
-                        vct_parts[i] - dc_du_l[i] @ C_inv_dc_du_r_T_D_inv_vct,
+                        lu_and_piv_D_blocks[i],
+                        vct_parts[i] - dc_du_l_blocks[i] @ C_inv_dc_du_r_T_D_inv_vct,
                     ).flatten()
                     for i in range(3)
                 ]
             )
 
         @api.jit
-        def normal_space_component(vct, dc_du, dc_dv, chol_C, chol_D):
+        def normal_space_component(
+            vct, dc_du_blocks, dc_dv_blocks, chol_C, chol_D_blocks
+        ):
             """Compute component of vector in normal space to manifold at a point."""
             return rmult_by_jacob_constr(
-                dc_du,
-                dc_dv,
+                dc_du_blocks,
+                dc_dv_blocks,
                 lmult_by_inv_gram(
-                    dc_du,
-                    dc_dv,
+                    dc_du_blocks,
+                    dc_dv_blocks,
                     chol_C,
-                    chol_D,
-                    lmult_by_jacob_constr(dc_du, dc_dv, vct),
+                    chol_D_blocks,
+                    lmult_by_jacob_constr(dc_du_blocks, dc_dv_blocks, vct),
                 ),
             )
 
@@ -643,10 +683,10 @@ class ConditionedDiffusionConstrainedSystem(System):
             q,
             x_obs_seq,
             partition,
-            dc_du_prev,
-            dc_dv_prev,
+            dc_du_prev_blocks,
+            dc_dv_prev_blocks,
             chol_C_prev,
-            chol_D_prev,
+            chol_D_prev_blocks,
             dt,
             convergence_tol,
             position_tol,
@@ -660,10 +700,14 @@ class ConditionedDiffusionConstrainedSystem(System):
                 c = constr(q, x_obs_seq, partition)
                 error = norm(c)
                 delta_mu = rmult_by_jacob_constr(
-                    dc_du_prev,
-                    dc_dv_prev,
+                    dc_du_prev_blocks,
+                    dc_dv_prev_blocks,
                     lmult_by_inv_gram(
-                        dc_du_prev, dc_dv_prev, chol_C_prev, chol_D_prev, c
+                        dc_du_prev_blocks,
+                        dc_dv_prev_blocks,
+                        chol_C_prev,
+                        chol_D_prev_blocks,
+                        c,
                     ),
                 )
                 if not isinstance(metric, IdentityMatrix):
@@ -703,8 +747,8 @@ class ConditionedDiffusionConstrainedSystem(System):
             q,
             x_obs_seq,
             partition,
-            dc_du_prev,
-            dc_dv_prev,
+            dc_du_prev_blocks,
+            dc_dv_prev_blocks,
             dt,
             convergence_tol,
             position_tol,
@@ -716,21 +760,23 @@ class ConditionedDiffusionConstrainedSystem(System):
             def body_func(val):
                 q, mu, i, _, _ = val
                 c = constr(q, x_obs_seq, partition)
-                dc_du, dc_dv = jacob_constr_blocks(q, x_obs_seq, partition)
-                lu_and_piv_C, lu_and_piv_D = lu_jacob_product_blocks(
-                    dc_du, dc_dv, dc_du_prev, dc_dv_prev
+                dc_du_blocks, dc_dv_blocks = jacob_constr_blocks(
+                    q, x_obs_seq, partition
+                )
+                lu_and_piv_C, lu_and_piv_D_blocks = lu_jacob_product_blocks(
+                    dc_du_blocks, dc_dv_blocks, dc_du_prev_blocks, dc_dv_prev_blocks
                 )
                 error = norm(c)
                 delta_mu = rmult_by_jacob_constr(
-                    dc_du_prev,
-                    dc_dv_prev,
+                    dc_du_prev_blocks,
+                    dc_dv_prev_blocks,
                     lmult_by_inv_jacob_product(
-                        dc_du,
-                        dc_dv,
-                        dc_du_prev,
-                        dc_dv_prev,
+                        dc_du_blocks,
+                        dc_dv_blocks,
+                        dc_du_prev_blocks,
+                        dc_dv_prev_blocks,
                         lu_and_piv_C,
-                        lu_and_piv_D,
+                        lu_and_piv_D_blocks,
                         c,
                     ),
                 )
