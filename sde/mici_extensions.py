@@ -193,17 +193,23 @@ class ConditionedDiffusionConstrainedSystem(System):
         self.dim_u = dim_u
         self.dim_v = dim_v
         self.dim_v_0 = dim_v_0
+        self.dim_y = dim_y
         self.dim_q = (
             dim_u
             + dim_v_0
             + dim_v * num_obs * num_steps_per_obs
             + (num_obs * dim_y if noisy_observations else 0)
         )
+        self.num_obs = num_obs
         self.num_steps_per_obs = num_steps_per_obs
         self.generate_x_0 = generate_x_0
         self.generate_z = generate_z
         self.forward_func = forward_func
+        self.obs_func = obs_func
+        self.obs_noise_std = obs_noise_std
         self.δ = δ
+        self.y_seq = y_seq
+        self.obs_indices = obs_indices
 
         @api.jit
         def step_func(z, x, v):
@@ -213,7 +219,12 @@ class ConditionedDiffusionConstrainedSystem(System):
         @api.jit
         def generate_x_obs_seq(q):
             """Generate state sequence at observation time indices."""
-            u, v_0, v_seq_flat = split(q, (dim_u, dim_v_0))
+            if noisy_observations:
+                u, v_0, v_seq_flat, _ = split(
+                    q, (dim_u, dim_v_0, num_obs * num_steps_per_obs * dim_v)
+                )
+            else:
+                u, v_0, v_seq_flat = split(q, (dim_u, dim_v_0,))
             z = generate_z(u)
             x_0 = generate_x_0(z, v_0)
             v_seq = np.reshape(v_seq_flat, (-1, dim_v))
@@ -361,7 +372,12 @@ class ConditionedDiffusionConstrainedSystem(System):
         @api.jit
         def init_objective(q, x_obs_seq, reg_coeff):
             """Optimisation objective to find initial state on manifold."""
-            u, v_0, v_seq_flat = split(q, (dim_u, dim_v_0,))
+            if noisy_observations:
+                u, v_0, v_seq_flat, _ = split(
+                    q, (dim_u, dim_v_0, num_obs * num_steps_per_obs * dim_v)
+                )
+            else:
+                u, v_0, v_seq_flat = split(q, (dim_u, dim_v_0,))
             v_subseqs = v_seq_flat.reshape((num_obs, num_steps_per_obs, dim_v))
             z = generate_z(u)
             x_0 = generate_x_0(z, v_0)
@@ -1277,7 +1293,7 @@ def jitted_solve_projection_onto_manifold_newton(
 
 
 def find_initial_state_by_linear_interpolation(
-    system, rng, generate_x_obs_seq_init,
+    system, rng, generate_x_obs_seq_init, u=None, v_0=None,
 ):
     """Find an initial constraint satisying state linearly interpolating noise sequence.
 
@@ -1318,13 +1334,20 @@ def find_initial_state_by_linear_interpolation(
             (num_obs * system.num_steps_per_obs, system.dim_v)
         )
 
-    u = rng.standard_normal(system.dim_u)
+    u = rng.standard_normal(system.dim_u) if u is None else u
     z = system.generate_z(u)
-    v_0 = rng.standard_normal(system.dim_v_0)
+    v_0 = rng.standard_normal(system.dim_v_0) if v_0 is None else v_0
     x_0 = system.generate_x_0(z, v_0)
     x_obs_seq = generate_x_obs_seq_init(rng)
     v_seq = solve_for_v_seq(x_obs_seq, x_0, z)
-    q = onp.concatenate([u, v_0, v_seq.flatten()])
+    if system.obs_noise_std > 0:
+        n = onp.zeros(system.dim_y * system.num_obs)
+        q = onp.concatenate([u, v_0, v_seq.flatten(), n])
+        y_gen = system.obs_func(system._generate_x_obs_seq(q))
+        n = (y_gen - system.y_seq).flatten() / system.obs_noise_std
+        q = onp.concatenate([u, v_0, v_seq.flatten(), n])
+    else:
+        q = onp.concatenate([u, v_0, v_seq.flatten()])
     state = ConditionedDiffusionHamiltonianState(pos=q, x_obs_seq=x_obs_seq)
     assert onp.allclose(system.constr(state), 0)
     state.mom = system.sample_momentum(state, rng)
