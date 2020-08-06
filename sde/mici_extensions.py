@@ -51,7 +51,7 @@ def convert_to_numpy_pytree(jax_pytree):
     """Recursively convert 'pytree' of JAX arrays to NumPy arrays."""
     if isinstance(jax_pytree, np.DeviceArray):
         return onp.asarray(jax_pytree)
-    elif isinstance(jax_pytree, (float, int, complex, bool)):
+    elif isinstance(jax_pytree, (float, int, complex, bool, type(None))):
         return jax_pytree
     elif isinstance(jax_pytree, tuple):
         return tuple(convert_to_numpy_pytree(subtree) for subtree in jax_pytree)
@@ -79,7 +79,7 @@ class ConditionedDiffusionConstrainedSystem(System):
         generate_x_0,
         generate_z,
         obs_func,
-        obs_noise_std=0,
+        generate_σ=None,
         use_gaussian_splitting=False,
         metric=None,
         dim_v_0=None,
@@ -117,10 +117,15 @@ class ConditionedDiffusionConstrainedSystem(System):
             obs_func (Callable[[array], array]): Function mapping from state
                 vector `x` at an observation time to the corresponding observed
                 vector `y = obs_func(x)`.
-            obs_noise_std (float): Standard-deviation of independent and zero-mean
-                Gaussian noise added to observations. If equal to zero (the default)
-                noiseless observations will be assumed (with the resulting latent
-                state not including a component for the observation noise).
+            generate_σ (None or Callable[[array], array]): Function to generate
+                standard-deviation(s) of independent and zero-mean Gaussian noise added
+                to observations. Function should accept a single array argument
+                corresponding to the vector `u` mapping to the parameters which allows
+                for variable observation noise standard-deviations (or alternatively
+                this argument may be ignore and a constant array returned if the
+                standard-deviations are fixed). If equal to `None` (the default)
+                noiseless observations will be assumed (with the resulting latent state
+                not including a component for the observation noise).
             use_gaussian_splitting (bool): Whether to use Gaussian specific splitting
                     h₁(q) = ½log(∂c(q)ᵀ∂c(q)), h₂(q, p) = ½qᵀq + ½pᵀp
                 Or the more standard splitting
@@ -187,7 +192,7 @@ class ConditionedDiffusionConstrainedSystem(System):
         y_subseqs_p1[1] = np.reshape(
             y_subseqs_p1[1], (num_subseq - 1, num_obs_per_subseq, dim_y)
         )
-        noisy_observations = obs_noise_std > 0
+        noisy_observations = generate_σ is not None
         dim_y = y_seq.shape[-1]
         dim_v_0 = dim_x if dim_v_0 is None else dim_v_0
         self.dim_u = dim_u
@@ -204,9 +209,9 @@ class ConditionedDiffusionConstrainedSystem(System):
         self.num_steps_per_obs = num_steps_per_obs
         self.generate_x_0 = generate_x_0
         self.generate_z = generate_z
+        self.generate_σ = generate_σ
         self.forward_func = forward_func
         self.obs_func = obs_func
-        self.obs_noise_std = obs_noise_std
         self.δ = δ
         self.y_seq = y_seq
         self.obs_indices = obs_indices
@@ -231,13 +236,13 @@ class ConditionedDiffusionConstrainedSystem(System):
             _, x_seq = lax.scan(lambda x, v: step_func(z, x, v), x_0, v_seq)
             return x_seq[obs_indices]
 
-        def generate_y_bar(z, w_0, v_seq, n, b):
+        def generate_y_bar(z, w_0, v_seq, σ_n_seq, b):
             """Generate partial observation subsequence."""
             x_0 = generate_x_0(z, w_0) if b == 0 else w_0
             _, x_seq = lax.scan(lambda x, v: step_func(z, x, v), x_0, v_seq)
             y_seq = obs_func(x_seq[obs_indices])
             if noisy_observations:
-                y_seq = y_seq + obs_noise_std * n
+                y_seq = y_seq + σ_n_seq
             if b == 2:
                 return y_seq.flatten()
             elif noisy_observations:
@@ -246,35 +251,33 @@ class ConditionedDiffusionConstrainedSystem(System):
                 return np.concatenate((y_seq[:-1].flatten(), x_seq[-1]))
 
         @api.partial(api.jit, static_argnums=(4,))
-        def partition_into_subseqs(v_seq, v_0, n, x_obs_seq, partition=0):
-            """Partition noise increment and observation sequences.
+        def partition_into_subseqs(v_seq, v_0, n_seq, x_obs_seq, partition=0):
+            """Partition noise and observation sequences into subsequences.
 
             Partitition sequences in to either `num_subseq` equally sized
             subsequences (`partition == 0`)  or `num_subseq - 1` equally sized
             subsequences plus initial and final 'half' subsequences.
             """
-            slice_end = None if noisy_observations else -1
+            end_y = None if noisy_observations else -1
+            if not noisy_observations:
+                n_subseqs = (None,) * 3
             if partition == 0:
                 v_subseqs = v_seq.reshape((num_subseq, num_step_per_subseq, dim_v))
                 v_subseqs = (v_subseqs[0], v_subseqs[1:-1], v_subseqs[-1])
                 if noisy_observations:
-                    n_subseqs = n.reshape((num_subseq, num_obs_per_subseq, dim_y))
+                    n_subseqs = n_seq.reshape((num_subseq, num_obs_per_subseq, dim_y))
                     n_subseqs = (n_subseqs[0], n_subseqs[1:-1], n_subseqs[-1])
-                else:
-                    n_subseqs = (None,) * 3
                 x_obs_subseqs = x_obs_seq.reshape(
                     (num_subseq, num_obs_per_subseq, dim_x)
                 )
                 w_inits = (v_0, x_obs_subseqs[:-2, -1], x_obs_subseqs[-2, -1])
                 y_bars = (
                     np.concatenate(
-                        (y_subseqs_p0[0, :slice_end].flatten(), x_obs_subseqs[0, -1])
+                        (y_subseqs_p0[0, :end_y].flatten(), x_obs_subseqs[0, -1])
                     ),
                     np.concatenate(
                         (
-                            y_subseqs_p0[1:-1, :slice_end].reshape(
-                                (num_subseq - 2, -1)
-                            ),
+                            y_subseqs_p0[1:-1, :end_y].reshape((num_subseq - 2, -1)),
                             x_obs_subseqs[1:-1, -1],
                         ),
                         -1,
@@ -294,7 +297,7 @@ class ConditionedDiffusionConstrainedSystem(System):
                 )
                 if noisy_observations:
                     n_subseqs = split(
-                        n,
+                        n_seq,
                         (
                             (num_obs_per_subseq // 2),
                             num_obs_per_subseq * (num_subseq - 1),
@@ -303,8 +306,6 @@ class ConditionedDiffusionConstrainedSystem(System):
                     n_subseqs[1] = n_subseqs[1].reshape(
                         (num_subseq - 1, num_obs_per_subseq, dim_y)
                     )
-                else:
-                    n_subseqs = (None,) * 3
                 x_obs_subseqs = split(
                     x_obs_seq, (num_obs_per_subseq // 2, num_obs - num_obs_per_subseq)
                 )
@@ -320,13 +321,11 @@ class ConditionedDiffusionConstrainedSystem(System):
                 )
                 y_bars = (
                     np.concatenate(
-                        (y_subseqs_p1[0][:slice_end].flatten(), x_obs_subseqs[0][-1])
+                        (y_subseqs_p1[0][:end_y].flatten(), x_obs_subseqs[0][-1])
                     ),
                     np.concatenate(
                         (
-                            y_subseqs_p1[1][:, :slice_end].reshape(
-                                (num_subseq - 1, -1)
-                            ),
+                            y_subseqs_p1[1][:, :end_y].reshape((num_subseq - 1, -1)),
                             x_obs_subseqs[1][:, -1],
                         ),
                         -1,
@@ -342,14 +341,14 @@ class ConditionedDiffusionConstrainedSystem(System):
                 u, v_0, v_seq_flat, n_flat = split(
                     q, (dim_u, dim_v_0, num_obs * dim_v * num_steps_per_obs, num_obs)
                 )
-                n = n_flat.reshape((-1, dim_y))
+                n_seq = n_flat.reshape((-1, dim_y))
             else:
                 u, v_0, v_seq_flat = split(q, (dim_u, dim_v_0,))
-                n = None
+                n_seq = None
             v_seq = v_seq_flat.reshape((-1, dim_v))
             z = generate_z(u)
             (v_subseqs, n_subseqs, w_inits, y_bars) = partition_into_subseqs(
-                v_seq, v_0, n, x_obs_seq, partition
+                v_seq, v_0, n_seq, x_obs_seq, partition
             )
             gen_funcs = (
                 generate_y_bar,
@@ -359,10 +358,15 @@ class ConditionedDiffusionConstrainedSystem(System):
                 ),
                 generate_y_bar,
             )
+            if noisy_observations:
+                σ = generate_σ(u)
+                σ_n_subseqs = tuple(σ * n_subseqs[i] for i in range(3))
+            else:
+                σ_n_subseqs = (None,) * 3
             return np.concatenate(
                 [
                     (
-                        gen_funcs[b](z, w_inits[b], v_subseqs[b], n_subseqs[b], b)
+                        gen_funcs[b](z, w_inits[b], v_subseqs[b], σ_n_subseqs[b], b)
                         - y_bars[b]
                     ).flatten()
                     for b in range(3)
@@ -399,101 +403,140 @@ class ConditionedDiffusionConstrainedSystem(System):
         def jacob_constr_blocks(q, x_obs_seq, partition=0):
             """Return non-zero blocks of constraint function Jacobian.
 
-            Input state `q` can be decomposed into `q = [u, v₀, v₁, v₂]` where global
-            latent variables (parameters) are determined by `u`, initial subsequence by
-            `v₀`, middle subsequences by `v₁` and final subsequence by `v₂`.
+            Input state `q` can be decomposed as
 
-            Constraint function can then be decomposed as
+                q = [u, v₀, v₁, v₂, n₀, n₁, n₂]
 
-                c(q) = [c₀(u, v₀), c₁(u, v₁), c₂(u, v₂)]
+            where global latent variables (parameters) are determined by `u`, Wiener
+            noise increment subsequences by `(v₀, v₁, v₂)` (initial, middle, final
+            subsequences) and observation noise subsequences by `(n₀, n₁, n₂)` (initial,
+            middle, final subsequences) where present i.e. when observations are noisy.
+
+            The constraint function can then be decomposed as
+
+                c(q) = c̅(u, v, n) = [c₀(u, v₀, n₀), c₁(u, v₁, n₁), c₂(u, v₂, n₂)]
 
             abd the constraint Jacobian has the block structure
 
-                ∂c(q) = [[∂₀c₀(u, v₀), ∂₁c₀(u, v₀),     0,     ,     0      ]
-                         [∂₀c₁(u, v₁),     0      , ∂₁c₁(u, v₁),     0      ]
-                         [∂₀c₂(u, v₀),     0      ,     0      , ∂₁c₂(u, v₂)]]
+                ∂c([u, v, n]) = [∂₀c̅(u, v, n), ∂₁c̅(u, v, n), ∂₂c̅(u, v, n)]
 
-            where `∂₁c₁(u, v₁)` is itself block diagonal.
+            with
+
+                ∂₀c̅(u, v, n) = [[∂₀c₀(u, v₀, n₀)]
+                                [∂₀c₁(u, v₁, n₁)]
+                                [∂₀c₂(u, v₀, n₁)]]
+
+                ∂₁c̅(u, v, n) = [[∂₁c₀(u, v₀, n₀),         0       ,        0       ]
+                                [       0       ,  ∂₁c₁(u, v₁, n₁),        0       ]
+                                [       0       ,         0       , ∂₁c₂(u, v₂, n₂)]]
+
+                ∂₂c̅(u, v, n) = [[∂₂c₀(u, v₀, n₀),         0       ,        0       ]
+                                [       0       ,  ∂₂c₁(u, v₁, n₁),        0       ]
+                                [       0       ,         0       , ∂₂c₂(u, v₂, n₂)]]
+
+            where `∂₁c₁(u, v₁, n₁)` ad `∂₂c₁(u, v₁, n₁)` are both block diagonal.
             """
 
-            def g_y_bar(u, v, w_0, n, b):
+            def g_y_bar(u, v, n, w_0, b):
                 z = generate_z(u)
+                if noisy_observations:
+                    σ = generate_σ(u)
+                    σ_n = σ * n
+                else:
+                    σ_n = None
                 if b == 0:
                     w_0, v = split(v, (dim_x,))
                 v_seq = v.reshape((-1, dim_v))
-                return generate_y_bar(z, w_0, v_seq, n, b)
+                return generate_y_bar(z, w_0, v_seq, σ_n, b)
 
             if noisy_observations:
                 u, v_0, v_seq_flat, n_flat = split(
                     q, (dim_u, dim_v_0, num_obs * dim_v * num_steps_per_obs, num_obs)
                 )
-                n = n_flat.reshape((-1, dim_y))
+                n_seq = n_flat.reshape((-1, dim_y))
             else:
                 u, v_0, v_seq_flat = split(q, (dim_u, dim_v_0,))
-                n = None
+                n_seq = None
             v_seq = v_seq_flat.reshape((-1, dim_v))
             (v_subseqs, n_subseqs, w_inits, _) = partition_into_subseqs(
-                v_seq, v_0, n, x_obs_seq, partition
+                v_seq, v_0, n_seq, x_obs_seq, partition
             )
             v_bars = (
                 np.concatenate([v_0, v_subseqs[0].flatten()]),
                 v_subseqs[1].reshape((v_subseqs[1].shape[0], -1)),
                 v_subseqs[2].flatten(),
             )
-            jac_g_y_bar = api.jacrev(g_y_bar, (0, 1))
+            jacob_g_y_bar = api.jacrev(g_y_bar, (0, 1))
             jacob_funcs = (
-                jac_g_y_bar,
+                jacob_g_y_bar,
                 api.vmap(
-                    jac_g_y_bar, (None, 0, 0, 0 if noisy_observations else None, None)
+                    jacob_g_y_bar, (None, 0, 0 if noisy_observations else None, 0, None)
                 ),
-                jac_g_y_bar,
+                jacob_g_y_bar,
             )
-            return tuple(
-                zip(
-                    *(
-                        jacob_funcs[b](u, v_bars[b], w_inits[b], n_subseqs[b], b)
-                        for b in range(3)
+            if noisy_observations:
+                σ = generate_σ(u)
+                dc_dn_blocks = tuple(
+                    (σ * np.ones_like(n_subseqs[i])).reshape(
+                        (n_subseqs[i].shape[0], -1) if i == 1 else (-1,)
                     )
+                    for i in range(3)
+                )
+            else:
+                dc_dn_blocks = (None,) * 3
+            dc_du_blocks, dc_dv_blocks = zip(
+                *(
+                    jacob_funcs[b](u, v_bars[b], n_subseqs[b], w_inits[b], b)
+                    for b in range(3)
                 )
             )
+            return dc_du_blocks, dc_dv_blocks, dc_dn_blocks
 
         @api.jit
-        def chol_gram_blocks(dc_du_blocks, dc_dv_blocks):
+        def chol_gram_blocks(dc_du_blocks, dc_dv_blocks, dc_dn_blocks):
             """Calculate Cholesky factors of decomposition of `∂c(q) M⁻¹ ∂c(q)ᵀ`.
 
             The constraint Jacobian decomposes as
 
-                ∂c([u, v]) = [∂₀c̅(u, v), ∂₁c̅(u, v)]
+                ∂c([u, v, n]) = [∂₀c̅(u, v, n), ∂₁c̅(u, v, n) ∂₂c̅(u, v, n)]
 
-            where `c̅(u, v) = c([u, v])` and `∂₀c̅(u, v)` is a dense tall rectangular
-            matrix and `∂₁c̅(u, v)` is a rectangular block diagonal matrix. Similarly
-            the metric matrix represention `M` is assumed to have the block structure
-            `M = diag(M₀, M₁)` where `M₀` is a `dim_u × dim_u` square matrix and `M₁` is
-            a `dim_v × dim_v` diagonal matrix.
+            where `c̅(u, v, n) = c([u, v, n])`, `∂₀c̅(u, v, n)` is a dense tall
+            rectangular matrix, `∂₁c̅(u, v, n)` is a rectangular block diagonal matrix
+            and `∂₂c̅(u, v, n)` is a rectangular block diagonal matrix. Similarly the
+            metric matrix represention `M` is assumed to have the block structure `M =
+            diag(M₀, M₁, M₂)` where `M₀` is a `dim_u × dim_u` square matrix, `M₁` is a
+            `dim_v × dim_v` diagonal matrix and `M₂` is a `num_obs × dim_y` diagonal
+            matrix.
 
             The Gram matrix can therefore be decomposed as
 
-                ∂c([u, v]) M⁻¹ ∂c([u, v])ᵀ =
-                ∂₀c̅(u, v) M₀⁻¹ ∂₀c̅(u, v)ᵀ + ∂₁c̅(u, v) M₁⁻¹ ∂₁c̅(u, v)ᵀ
+                ∂c([u, v, n]) M⁻¹ ∂c([u, v, n])ᵀ =
+                ∂₀c̅(u, v, n) M₀⁻¹ ∂₀c̅(u, v, n)ᵀ +
+                ∂₁c̅(u, v, n) M₁⁻¹ ∂₁c̅(u, v, n)ᵀ +
+                ∂₂c̅(u, v, n) M₂⁻¹ ∂₂c̅(u, v, n)ᵀ
 
             denoting
 
-                D(u, v) = ∂₁c̅(u, v) M₁⁻¹ ∂₁c̅(u, v)ᵀ
+                D(u, v, n) = ∂₁c̅(u, v, n) M₁⁻¹ ∂₁c̅(u, v, n)ᵀ +
+                             ∂₂c̅(u, v, n) M₂⁻¹ ∂₂c̅(u, v, n)ᵀ
 
             with `D` square block diagonal and positive definite and
 
-                C(u, v) = M₀ + ∂₀c̅(u, v)ᵀ D(u, v)⁻¹ ∂₀c̅(u, v)
+                C(u, v, n) = M₀ + ∂₀c̅(u, v, n)ᵀ D(u, v, n)⁻¹ ∂₀c̅(u, v, n)
 
             with `C` positive definite, by the Woodbury matrix identity we have
 
-                (∂c([u, v]) M⁻¹ ∂c([u, v])ᵀ)⁻¹ =
-                D(u, v)⁻¹ - D(u, v)⁻¹ ∂₀c̅(u, v) C(u, v)⁻¹ ∂₀c̅(u, v)ᵀ D(u, v)⁻¹
+                (∂c([u, v, n]) M⁻¹ ∂c([u, v, n])ᵀ)⁻¹ =
+                D(u, v, n)⁻¹ -
+                D(u, v, n)⁻¹ ∂₀c̅(u, v, n) C(u, v, n)⁻¹ ∂₀c̅(u, v, n)ᵀ D(u, v, n)⁻¹
 
-            Therefore by computing the Cholesky decomposition of `C(u, v)` and the
-            blocks of `D(u, v)` we can solve for systems in the Gram matrix.
+            Therefore by computing the Cholesky decompositions of `C(u, v, n)` and the
+            blocks of `D(u, v, n)` we can solve for systems in the Gram matrix.
             """
             M_0 = get_M_0_matrix()
-            D_blocks = compute_D_blocks(dc_dv_blocks, dc_dv_blocks)
+            D_blocks = compute_D_blocks(
+                dc_dv_blocks, dc_dn_blocks, dc_dv_blocks, dc_dn_blocks
+            )
             chol_D_blocks = tuple(nla.cholesky(D_blocks[i]) for i in range(3))
             D_inv_dc_du_blocks = tuple(
                 sla.cho_solve((chol_D_blocks[i], True), dc_du_blocks[i])
@@ -511,47 +554,60 @@ class ConditionedDiffusionConstrainedSystem(System):
 
         @api.jit
         def lu_jacob_product_blocks(
-            dc_du_l_blocks, dc_dv_l_blocks, dc_du_r_blocks, dc_dv_r_blocks
+            dc_du_l_blocks,
+            dc_dv_l_blocks,
+            dc_dn_l_blocks,
+            dc_du_r_blocks,
+            dc_dv_r_blocks,
+            dc_dn_r_blocks,
         ):
             """Calculate LU factors of decomposition of ∂c(q) M⁻¹ ∂c(q')ᵀ
 
             The constraint Jacobian decomposes as
 
-                ∂c([u, v]) = [∂₀c̅(u, v), ∂₁c̅(u, v)]
+                ∂c([u, v, n]) = [∂₀c̅(u, v, n), ∂₁c̅(u, v, n) ∂₂c̅(u, v, n)]
 
-            where c̅(u, v) = c([u, v]) and ∂₀c̅(u, v) is a dense tall
-            rectangular matrix and ∂₁c̅(u, v) is a rectangular block diagonal
-            matrix. Similarly the metric matrix represention M is assumed to
-            have the block structure M = diag(M₀, M₁) where M₀ is a square
-            matrix of the same size as u and M₁ is a square matrix of the same
-            size as v.
+            where `c̅(u, v, n) = c([u, v, n])`, `∂₀c̅(u, v, n)` is a dense tall
+            rectangular matrix, `∂₁c̅(u, v, n)` is a rectangular block diagonal matrix
+            and `∂₂c̅(u, v, n)` is a rectangular block diagonal matrix. Similarly the
+            metric matrix represention `M` is assumed to have the block structure `M =
+            diag(M₀, M₁, M₂)` where `M₀` is a `dim_u × dim_u` square matrix, `M₁` is a
+            `dim_v × dim_v` diagonal matrix and `M₂` is a `num_obs × dim_y` diagonal
+            matrix.
 
-            The Jacobian product ∂c([u, v]) M⁻¹ ∂c([u', v'])ᵀ can therefore be
+            The Jacobian product `∂c([u, v, n]) M⁻¹ ∂c([u', v', n'])ᵀ` can therefore be
             decomposed as
 
-                ∂c([u, v]) M⁻¹ ∂c([u', v'])ᵀ =
-                ∂₀c̅(u, v) M₀⁻¹ ∂₀c̅(u', v')ᵀ + ∂₁c̅(u', v') M₁⁻¹ ∂₁c̅(u', v')ᵀ
+                ∂c([u, v, n]) M⁻¹ ∂c([u', v', n'])ᵀ =
+                ∂₀c̅(u, v, n) M₀⁻¹ ∂₀c̅(u', v', n')ᵀ +
+                ∂₁c̅(u, v, n) M₁⁻¹ ∂₁c̅(u', v', n')ᵀ +
+                ∂₂c̅(u, v, n) M₂⁻¹ ∂₂c̅(u', v', n')ᵀ
 
             denoting
 
-                D(u, v, u', v') = ∂₁c̅(u, v) M₁⁻¹ ∂₁c̅(u', v')ᵀ
+                D(u, v, n, u', v', n') = ∂₁c̅(u, v, n) M₁⁻¹ ∂₁c̅(u', v', n')ᵀ +
+                                         ∂₂c̅(u, v, n) M₂⁻¹ ∂₂c̅(u', v', n')ᵀ
 
-            with D square block diagonal and
+            with `D` square block diagonal and
 
-                C(u, v, u', v') = M₀ + ∂₀c̅(u', v')ᵀ D(u, v)⁻¹ ∂₀c̅(u, v)
+                C(u, v, n, u', v', n') =
+                M₀ + ∂₀c̅(u', v', n')ᵀ D(u, v, n, u', v', n')⁻¹ ∂₀c̅(u, v, n)
 
             we then have by the Woodbury matrix identity
 
-                (∂c([u, v]) M⁻¹ ∂c([u', v'])ᵀ)⁻¹ =
-                D(u, v, u', v')⁻¹ -
-                D(u, v, u', v')⁻¹ ∂₀c̅(u, v) C(u, v, u', v')⁻¹ ∂₀c̅(u', v')ᵀ
-                D(u, v, u', v')⁻¹
+                (∂c([u, v, n]) M⁻¹ ∂c([u', v', n'])ᵀ)⁻¹ =
+                D(u, v, n, u', v', n')⁻¹ -
+                D(u, v, n, u', v', n')⁻¹
+                ∂₀c̅(u, v, n) C(u, v, n, u', v', n')⁻¹ ∂₀c̅(u', v', n')ᵀ
+                D(u, v, n, u', v', n')⁻¹
 
-            Therefore by computing the Cholesky decomposition of C and
-            the blocks of D we can solve for systems in the Jacobian product.
+            Therefore by computing LU factors of `C` and the blocks of `D` we can solve
+            for systems in the Jacobian product.
             """
             M_0 = get_M_0_matrix()
-            D_blocks = compute_D_blocks(dc_dv_l_blocks, dc_dv_r_blocks)
+            D_blocks = compute_D_blocks(
+                dc_dv_l_blocks, dc_dn_l_blocks, dc_dv_r_blocks, dc_dn_r_blocks
+            )
             lu_and_piv_D_blocks = tuple(sla.lu_factor(D_blocks[i]) for i in range(3))
             D_inv_dc_du_l_blocks = tuple(
                 sla.lu_solve(lu_and_piv_D_blocks[i], dc_du_l_blocks[i])
@@ -569,7 +625,9 @@ class ConditionedDiffusionConstrainedSystem(System):
             )
             return lu_and_piv_C, lu_and_piv_D_blocks
 
-        def compute_D_blocks(dc_dv_l_blocks, dc_dv_r_blocks):
+        def compute_D_blocks(
+            dc_dv_l_blocks, dc_dn_l_blocks, dc_dv_r_blocks, dc_dn_r_blocks
+        ):
             if isinstance(metric, IdentityMatrix) or isinstance(
                 metric.blocks[1], IdentityMatrix
             ):
@@ -600,28 +658,35 @@ class ConditionedDiffusionConstrainedSystem(System):
                 for i in range(3)
             ]
             if noisy_observations:
-                for i in range(3):
-                    diag_indices = np.diag_indices(D_blocks[i].shape[-2])
-                    if i == 2:
-                        D_blocks[i] = (
-                            D_blocks[i]
-                            .at[(...,) + diag_indices]
-                            .add(obs_noise_std ** 2)
+                d0, d2 = D_blocks[0].shape[0], D_blocks[2].shape[0]
+                d1 = D_blocks[1].shape[:2]
+                D_blocks[0] = (
+                    D_blocks[0]
+                    .at[np.diag_indices(d0)]
+                    .add(
+                        np.concatenate(
+                            [dc_dn_l_blocks[0] * dc_dn_r_blocks[0], np.zeros(dim_x)]
                         )
-                    else:
-                        D_blocks[i] = (
-                            D_blocks[i]
-                            .at[(...,) + diag_indices]
-                            .add(
-                                obs_noise_std ** 2
-                                * np.concatenate(
-                                    [
-                                        np.ones(D_blocks[i].shape[-1] - dim_x),
-                                        np.zeros(dim_x),
-                                    ]
-                                )
-                            )
+                    )
+                )
+                D_blocks[1] = (
+                    D_blocks[1]
+                    .at[(...,) + np.diag_indices(d1[1])]
+                    .add(
+                        np.concatenate(
+                            [
+                                dc_dn_l_blocks[1] * dc_dn_r_blocks[1],
+                                np.zeros((d1[0], dim_x)),
+                            ],
+                            1,
                         )
+                    )
+                )
+                D_blocks[2] = (
+                    D_blocks[2]
+                    .at[np.diag_indices(d2)]
+                    .add(dc_dn_l_blocks[2] * dc_dn_r_blocks[2])
+                )
             return D_blocks
 
         def get_M_0_matrix():
@@ -645,15 +710,15 @@ class ConditionedDiffusionConstrainedSystem(System):
         @api.partial(api.jit, static_argnums=(2,))
         def log_det_sqrt_gram(q, x_obs_seq, partition=0):
             """Calculate log-determinant of constraint Jacobian Gram matrix."""
-            dc_du_blocks, dc_dv_blocks = jacob_constr_blocks(q, x_obs_seq, partition)
-            chol_C, chol_D_blocks = chol_gram_blocks(dc_du_blocks, dc_dv_blocks)
+            jac_blocks = jacob_constr_blocks(q, x_obs_seq, partition)
+            chol_blocks = chol_gram_blocks(*jac_blocks)
             return (
-                log_det_sqrt_gram_from_chol(chol_C, chol_D_blocks),
-                ((dc_du_blocks, dc_dv_blocks), (chol_C, chol_D_blocks)),
+                log_det_sqrt_gram_from_chol(*chol_blocks),
+                (jac_blocks, chol_blocks),
             )
 
         @api.jit
-        def lmult_by_jacob_constr(dc_du_blocks, dc_dv_blocks, vct):
+        def lmult_by_jacob_constr(dc_du_blocks, dc_dv_blocks, dc_dn_blocks, vct):
             """Left-multiply vector by constraint Jacobian matrix."""
             if noisy_observations:
                 vct_u, vct_v, vct_n = split(
@@ -684,23 +749,25 @@ class ConditionedDiffusionConstrainedSystem(System):
                 )
             )
             if noisy_observations:
-                jacob_vct += obs_noise_std * np.concatenate(
+                jacob_vct += np.concatenate(
                     [
-                        np.concatenate([vct_n[:k0], np.zeros(dim_x)]),
+                        dc_dn_blocks[0] * vct_n[:k0],
+                        np.zeros(dim_x),
                         np.concatenate(
                             [
-                                vct_n[k0:-k2].reshape((n_block_1, -1)),
+                                dc_dn_blocks[1]
+                                * vct_n[k0:-k2].reshape((n_block_1, -1)),
                                 np.zeros((n_block_1, dim_x)),
                             ],
                             1,
                         ).flatten(),
-                        vct_n[-k2:],
+                        dc_dn_blocks[2] * vct_n[-k2:],
                     ]
                 )
             return jacob_vct
 
         @api.jit
-        def rmult_by_jacob_constr(dc_du_blocks, dc_dv_blocks, vct):
+        def rmult_by_jacob_constr(dc_du_blocks, dc_dv_blocks, dc_dn_blocks, vct):
             """Right-multiply vector by constraint Jacobian matrix."""
             vct_parts = split(
                 vct,
@@ -721,9 +788,13 @@ class ConditionedDiffusionConstrainedSystem(System):
                 ]
                 + (
                     [
-                        obs_noise_std * vct_parts[0][:-dim_x],
-                        obs_noise_std * vct_parts[1][:, :-dim_x].flatten(),
-                        obs_noise_std * vct_parts[2],
+                        np.concatenate(
+                            [
+                                dc_dn_blocks[0] * vct_parts[0][:-dim_x],
+                                (dc_dn_blocks[1] * vct_parts[1][:, :-dim_x]).flatten(),
+                                dc_dn_blocks[2] * vct_parts[2],
+                            ]
+                        )
                     ]
                     if noisy_observations
                     else []
@@ -731,7 +802,9 @@ class ConditionedDiffusionConstrainedSystem(System):
             )
 
         @api.jit
-        def lmult_by_inv_gram(dc_du_blocks, dc_dv_blocks, chol_C, chol_D_blocks, vct):
+        def lmult_by_inv_gram(
+            dc_du_blocks, dc_dv_blocks, dc_dn_blocks, chol_C, chol_D_blocks, vct
+        ):
             """Left-multiply vector by inverse Gram matrix."""
             vct_parts = split(
                 vct,
@@ -763,8 +836,10 @@ class ConditionedDiffusionConstrainedSystem(System):
         def lmult_by_inv_jacob_product(
             dc_du_l_blocks,
             dc_dv_l_blocks,
+            dc_dn_l_blocks,
             dc_du_r_blocks,
             dc_dv_r_blocks,
+            dc_dn_r_blocks,
             lu_and_piv_C,
             lu_and_piv_D_blocks,
             vct,
@@ -797,19 +872,14 @@ class ConditionedDiffusionConstrainedSystem(System):
             )
 
         @api.jit
-        def normal_space_component(
-            vct, dc_du_blocks, dc_dv_blocks, chol_C, chol_D_blocks
-        ):
+        def normal_space_component(vct, jacob_constr_blocks, chol_gram_blocks):
             """Compute component of vector in normal space to manifold at a point."""
             return rmult_by_jacob_constr(
-                dc_du_blocks,
-                dc_dv_blocks,
+                *jacob_constr_blocks,
                 lmult_by_inv_gram(
-                    dc_du_blocks,
-                    dc_dv_blocks,
-                    chol_C,
-                    chol_D_blocks,
-                    lmult_by_jacob_constr(dc_du_blocks, dc_dv_blocks, vct),
+                    *jacob_constr_blocks,
+                    *chol_gram_blocks,
+                    lmult_by_jacob_constr(*jacob_constr_blocks, vct),
                 ),
             )
 
@@ -817,15 +887,13 @@ class ConditionedDiffusionConstrainedSystem(System):
             """Infinity norm of a vector."""
             return np.max(np.abs(x))
 
-        @api.partial(api.jit, static_argnums=(2, 8, 9, 10, 11))
+        @api.partial(api.jit, static_argnums=(2, 6, 7, 8, 9))
         def quasi_newton_projection(
             q,
             x_obs_seq,
             partition,
-            dc_du_prev_blocks,
-            dc_dv_prev_blocks,
-            chol_C_prev,
-            chol_D_prev_blocks,
+            jacob_constr_blocks_prev,
+            chol_gram_blocks_prev,
             dt,
             convergence_tol,
             position_tol,
@@ -839,14 +907,9 @@ class ConditionedDiffusionConstrainedSystem(System):
                 c = constr(q, x_obs_seq, partition)
                 error = norm(c)
                 delta_mu = rmult_by_jacob_constr(
-                    dc_du_prev_blocks,
-                    dc_dv_prev_blocks,
+                    *jacob_constr_blocks_prev,
                     lmult_by_inv_gram(
-                        dc_du_prev_blocks,
-                        dc_dv_prev_blocks,
-                        chol_C_prev,
-                        chol_D_prev_blocks,
-                        c,
+                        *jacob_constr_blocks_prev, *chol_gram_blocks_prev, c,
                     ),
                 )
                 if not isinstance(metric, IdentityMatrix):
@@ -881,13 +944,12 @@ class ConditionedDiffusionConstrainedSystem(System):
             else:
                 return q, mu / dt, i, norm_delta_q, error
 
-        @api.partial(api.jit, static_argnums=(2, 6, 7, 8, 9))
+        @api.partial(api.jit, static_argnums=(2, 5, 6, 7, 8))
         def newton_projection(
             q,
             x_obs_seq,
             partition,
-            dc_du_prev_blocks,
-            dc_dv_prev_blocks,
+            jacob_constr_blocks_prev,
             dt,
             convergence_tol,
             position_tol,
@@ -899,23 +961,17 @@ class ConditionedDiffusionConstrainedSystem(System):
             def body_func(val):
                 q, mu, i, _, _ = val
                 c = constr(q, x_obs_seq, partition)
-                dc_du_blocks, dc_dv_blocks = jacob_constr_blocks(
-                    q, x_obs_seq, partition
-                )
-                lu_and_piv_C, lu_and_piv_D_blocks = lu_jacob_product_blocks(
-                    dc_du_blocks, dc_dv_blocks, dc_du_prev_blocks, dc_dv_prev_blocks
+                jacob_constr_blocks_curr = jacob_constr_blocks(q, x_obs_seq, partition)
+                lu_and_piv_jacob_product_blocks = lu_jacob_product_blocks(
+                    *jacob_constr_blocks_curr, *jacob_constr_blocks_prev
                 )
                 error = norm(c)
                 delta_mu = rmult_by_jacob_constr(
-                    dc_du_prev_blocks,
-                    dc_dv_prev_blocks,
+                    *jacob_constr_blocks_prev,
                     lmult_by_inv_jacob_product(
-                        dc_du_blocks,
-                        dc_dv_blocks,
-                        dc_du_prev_blocks,
-                        dc_dv_prev_blocks,
-                        lu_and_piv_C,
-                        lu_and_piv_D_blocks,
+                        *jacob_constr_blocks_curr,
+                        *jacob_constr_blocks_prev,
+                        *lu_and_piv_jacob_product_blocks,
                         c,
                     ),
                 )
@@ -1063,8 +1119,8 @@ class ConditionedDiffusionConstrainedSystem(System):
         return convert_to_numpy_pytree(
             self._normal_space_component(
                 self.metric.inv @ vct,
-                *self.jacob_constr_blocks(state),
-                *self.chol_gram_blocks(state),
+                self.jacob_constr_blocks(state),
+                self.chol_gram_blocks(state),
             )
         )
 
@@ -1181,18 +1237,16 @@ def jitted_solve_projection_onto_manifold_quasi_newton(
     structure in the constraint Jacobian `∂c` for conditioned diffusion systems
     and JIT compiles the iteration using JAX for better performance.
     """
-    dc_du_prev, dc_dv_prev = system.jacob_constr_blocks(state_prev)
-    chol_C_prev, chol_D_prev = system.chol_gram_blocks(state_prev)
+    jacob_constr_blocks_prev = system.jacob_constr_blocks(state_prev)
+    chol_gram_blocks_prev = system.chol_gram_blocks(state_prev)
     q, x_obs_seq, partition = state.pos, state.x_obs_seq, state.partition
     _, dh2_flow_mom_dmom = system.dh2_flow_dmom(dt)
     q_, mu, i, norm_delta_q, error = system.quasi_newton_projection(
         q,
         x_obs_seq,
         partition,
-        dc_du_prev,
-        dc_dv_prev,
-        chol_C_prev,
-        chol_D_prev,
+        jacob_constr_blocks_prev,
+        chol_gram_blocks_prev,
         dt,
         convergence_tol,
         position_tol,
@@ -1254,15 +1308,14 @@ def jitted_solve_projection_onto_manifold_newton(
     structure in the constraint Jacobian `∂c` for conditioned diffusion systems
     and JIT compiles the iteration using JAX for better performance.
     """
-    dc_du_prev, dc_dv_prev = system.jacob_constr_blocks(state_prev)
+    jacob_constr_blocks_prev = system.jacob_constr_blocks(state_prev)
     q, x_obs_seq, partition = state.pos, state.x_obs_seq, state.partition
     _, dh2_flow_mom_dmom = system.dh2_flow_dmom(dt)
     q_, mu, i, norm_delta_q, error = system.newton_projection(
         q,
         x_obs_seq,
         partition,
-        dc_du_prev,
-        dc_dv_prev,
+        jacob_constr_blocks_prev,
         dt,
         convergence_tol,
         position_tol,
@@ -1340,11 +1393,12 @@ def find_initial_state_by_linear_interpolation(
     x_0 = system.generate_x_0(z, v_0)
     x_obs_seq = generate_x_obs_seq_init(rng)
     v_seq = solve_for_v_seq(x_obs_seq, x_0, z)
-    if system.obs_noise_std > 0:
+    if system.generate_σ is not None:
         n = onp.zeros(system.dim_y * system.num_obs)
         q = onp.concatenate([u, v_0, v_seq.flatten(), n])
         y_gen = system.obs_func(system._generate_x_obs_seq(q))
-        n = (y_gen - system.y_seq).flatten() / system.obs_noise_std
+        σ = system.generate_σ(u)
+        n = ((y_gen - system.y_seq) / σ).flatten()
         q = onp.concatenate([u, v_0, v_seq.flatten(), n])
     else:
         q = onp.concatenate([u, v_0, v_seq.flatten()])
