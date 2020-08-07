@@ -183,6 +183,7 @@ class ConditionedDiffusionConstrainedSystem(System):
                 "supported."
             )
         num_subseq = num_obs // num_obs_per_subseq
+        num_step = num_obs * num_steps_per_obs
         obs_indices = slice(num_steps_per_obs - 1, None, num_steps_per_obs)
         num_step_per_subseq = num_obs_per_subseq * num_steps_per_obs
         y_subseqs_p0 = np.reshape(y_seq, (num_subseq, num_obs_per_subseq, -1))
@@ -339,7 +340,7 @@ class ConditionedDiffusionConstrainedSystem(System):
             """Calculate constraint function for current partition."""
             if noisy_observations:
                 u, v_0, v_seq_flat, n_flat = split(
-                    q, (dim_u, dim_v_0, num_obs * dim_v * num_steps_per_obs, num_obs)
+                    q, (dim_u, dim_v_0, num_step * dim_v, num_obs * dim_y)
                 )
                 n_seq = n_flat.reshape((-1, dim_y))
             else:
@@ -378,7 +379,7 @@ class ConditionedDiffusionConstrainedSystem(System):
             """Optimisation objective to find initial state on manifold."""
             if noisy_observations:
                 u, v_0, v_seq_flat, _ = split(
-                    q, (dim_u, dim_v_0, num_obs * num_steps_per_obs * dim_v)
+                    q, (dim_u, dim_v_0, num_step * dim_v, num_obs * dim_y)
                 )
             else:
                 u, v_0, v_seq_flat = split(q, (dim_u, dim_v_0,))
@@ -445,13 +446,13 @@ class ConditionedDiffusionConstrainedSystem(System):
                 else:
                     σ_n = None
                 if b == 0:
-                    w_0, v = split(v, (dim_x,))
+                    w_0, v = split(v, (dim_v_0,))
                 v_seq = v.reshape((-1, dim_v))
                 return generate_y_bar(z, w_0, v_seq, σ_n, b)
 
             if noisy_observations:
                 u, v_0, v_seq_flat, n_flat = split(
-                    q, (dim_u, dim_v_0, num_obs * dim_v * num_steps_per_obs, num_obs)
+                    q, (dim_u, dim_v_0, num_step * dim_v, num_obs * dim_y)
                 )
                 n_seq = n_flat.reshape((-1, dim_y))
             else:
@@ -1398,7 +1399,7 @@ def find_initial_state_by_linear_interpolation(
         q = onp.concatenate([u, v_0, v_seq.flatten(), n])
         y_gen = system.obs_func(system._generate_x_obs_seq(q))
         σ = system.generate_σ(u)
-        n = ((y_gen - system.y_seq) / σ).flatten()
+        n = ((system.y_seq - y_gen) / σ).flatten()
         q = onp.concatenate([u, v_0, v_seq.flatten(), n])
     else:
         q = onp.concatenate([u, v_0, v_seq.flatten()])
