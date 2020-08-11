@@ -400,6 +400,18 @@ class ConditionedDiffusionConstrainedSystem(System):
             )
             return 0.5 * np.mean(c ** 2) + 0.5 * reg_coeff * np.mean(q ** 2), c
 
+        @api.jit
+        def init_objective_noisy_observations(u_v):
+            """Optimisation objective to find initial state for noisy systems."""
+            u, v_0, v_flat = split(u_v, (dim_u, dim_v_0, num_step * dim_v))
+            v_seq = v_flat.reshape((num_obs * num_steps_per_obs, dim_v))
+            z = generate_z(u)
+            x_0 = generate_x_0(z, v_0)
+            σ = generate_σ(u)
+            _, x_seq = lax.scan(lambda x, v: step_func(z, x, v), x_0, v_seq)
+            residuals = (y_seq - obs_func(x_seq[obs_indices])) / σ
+            return 0.5 * np.sum(residuals ** 2) + 0.5 * np.sum(u_v ** 2), residuals
+
         @api.partial(api.jit, static_argnums=(2,))
         def jacob_constr_blocks(q, x_obs_seq, partition=0):
             """Return non-zero blocks of constraint function Jacobian.
@@ -1020,6 +1032,10 @@ class ConditionedDiffusionConstrainedSystem(System):
         self.value_and_grad_init_objective = api.jit(
             api.value_and_grad(init_objective, (0,), has_aux=True)
         )
+        self.init_objective_noisy_observations = init_objective_noisy_observations
+        self.grad_init_objective_noisy_observations = api.jit(
+            api.grad(init_objective_noisy_observations, has_aux=True)
+        )
         self._normal_space_component = normal_space_component
         self.quasi_newton_projection = quasi_newton_projection
         self.newton_projection = newton_projection
@@ -1479,4 +1495,69 @@ def find_initial_state_by_gradient_descent(
                     f"max|constr| = {max_abs_constr:.3e}"
                 )
             opt_state = opt_state_next
+    raise RuntimeError(f"Did not find valid state in {max_num_tries} tries.")
+
+
+def find_initial_state_by_gradient_descent_noisy_system(
+    system,
+    rng,
+    adam_step_size=2e-2,
+    max_iters=1000,
+    max_init_tries=100,
+    max_num_tries=10,
+):
+    """Find an initial constraint satisying state by a gradient descent based scheme.
+
+    Performs gradienty descent on negative log posterior density for noisy observation
+    system until mean residual squared is less than one, with state on manifold then
+    constructed by setting observation noise terms to residuals.
+    """
+
+    # Use optimizers to set optimizer initialization and update functions
+    opt_init, opt_update, get_params = opt.adam(adam_step_size)
+
+    # Define a compiled update step
+    @api.jit
+    def step(i, opt_state):
+        (u_v,) = get_params(opt_state)
+        grad, residuals = system.grad_init_objective_noisy_observations(u_v)
+        opt_state = opt_update(i, (grad,), opt_state)
+        return opt_state, residuals
+
+    for t in range(max_num_tries):
+        logging.info(f"Starting try {t+1}")
+        found_valid_init_state, init_tries = False, 0
+        while not found_valid_init_state and init_tries < max_init_tries:
+            u_v = rng.standard_normal(system.dim_q - system.num_obs * system.dim_y)
+            _, residuals = system.init_objective_noisy_observations(u_v)
+            if np.all(np.isfinite(residuals)):
+                found_valid_init_state = True
+            init_tries += 1
+        if init_tries == max_init_tries:
+            raise RuntimeError(
+                f"Did not find valid initial state in {init_tries} tries."
+            )
+        opt_state = opt_init((u_v,))
+        for i in range(max_iters):
+            opt_state_next, residuals = step(i, opt_state)
+            mean_residuals_sq = np.mean(residuals ** 2)
+            if not np.isfinite(mean_residuals_sq):
+                logger.info("Adam iteration diverged")
+                break
+            if mean_residuals_sq < 1:
+                logging.info("Found point with mean sq. residual < 1.")
+                (u_v,) = get_params(opt_state)
+                state = ConditionedDiffusionHamiltonianState(
+                    pos=onp.concatenate([u_v, residuals.flatten()]),
+                    x_obs_seq=None,
+                    _call_counts={},
+                )
+                system.update_x_obs_seq(state)
+                state.mom = system.sample_momentum(state, rng)
+                return state
+            opt_state = opt_state_next
+            if i % 100 == 0:
+                logging.info(
+                    f"Iteration {i: >6}: mean|residual^2| = {mean_residuals_sq:.3e}"
+                )
     raise RuntimeError(f"Did not find valid state in {max_num_tries} tries.")
