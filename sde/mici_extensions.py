@@ -10,12 +10,7 @@ from mici.systems import (
     cache_in_state,
     cache_in_state_with_aux,
 )
-from mici.matrices import (
-    PositiveDefiniteBlockDiagonalMatrix,
-    IdentityMatrix,
-    PositiveDiagonalMatrix,
-    PositiveScaledIdentityMatrix,
-)
+from mici.matrices import PositiveDefiniteBlockDiagonalMatrix, IdentityMatrix
 from mici.transitions import Transition
 from mici.states import ChainState, _cache_key_func
 from mici.solvers import maximum_norm
@@ -102,8 +97,10 @@ class ConditionedDiffusionConstrainedSystem(System):
             obs_interval (float): Interobservation time interval.
             num_steps_per_obs (int): Number of discrete time steps to simulate
                 between each observation time.
-            num_obs_per_subseq (int): Average number of observations per
-                partitioned subsequence. Must be a factor of `len(y_obs_seq)`.
+            num_obs_per_subseq (int or None): Number of observations per partitioned
+                subsequence. Shorter initial / final subsequences will be used when
+                the `num_obs_per_subseq` is not a factor of `num_obs`. If equal to
+                `None` or `num_obs` no partitioning / blocking will be performed.
             y_seq (array): Two-dimensional array containing observations at
                 equally spaced time intervals, with first axis of array
                 corresponding to observation time index (in order of increasing
@@ -178,13 +175,12 @@ class ConditionedDiffusionConstrainedSystem(System):
         if isinstance(metric, IdentityMatrix):
             log_det_sqrt_metric_0 = 0
         elif isinstance(metric, PositiveDefiniteBlockDiagonalMatrix) and isinstance(
-            metric.blocks[1],
-            (PositiveDiagonalMatrix, IdentityMatrix, PositiveScaledIdentityMatrix),
+            metric.blocks[1], IdentityMatrix,
         ):
             log_det_sqrt_metric_0 = metric.blocks[0].log_abs_det / 2
         else:
             raise NotImplementedError(
-                "Only identity and block diagonal metrics with diagonal lower "
+                "Only identity and block diagonal metrics with identity lower "
                 "right block currently supported."
             )
 
@@ -192,29 +188,37 @@ class ConditionedDiffusionConstrainedSystem(System):
         δ = obs_interval / num_steps_per_obs
         num_step = num_obs * num_steps_per_obs
         obs_indices = slice(num_steps_per_obs - 1, None, num_steps_per_obs)
-        y_subseq_shapes, v_subseq_shapes = [], []
-        for init_subseq_size in [num_obs_per_subseq, num_obs_per_subseq // 2]:
-            num_full, num_remaining = divmod(
-                num_obs - init_subseq_size, num_obs_per_subseq
-            )
-            num_middle = num_full - 1 if num_remaining == 0 else num_full
-            final_subseq_size = (
-                num_obs_per_subseq if num_remaining == 0 else num_remaining
-            )
-            y_subseq_shapes.append(
-                (
-                    (init_subseq_size,),
-                    (num_middle, num_obs_per_subseq),
-                    (final_subseq_size,),
+        if num_obs_per_subseq is None or num_obs_per_subseq == num_obs:
+            y_subseq_shapes = [((num_obs,),)]
+            v_subseq_shapes = [((num_obs * num_steps_per_obs,),)]
+            subseqs_are_batched = [(False,)]
+        else:
+            y_subseq_shapes, v_subseq_shapes, subseqs_are_batched = [], [], []
+            for init_subseq_size in [num_obs_per_subseq, num_obs_per_subseq // 2]:
+                num_full, num_remaining = divmod(
+                    num_obs - init_subseq_size, num_obs_per_subseq
                 )
-            )
-            v_subseq_shapes.append(
-                (
-                    (init_subseq_size * num_steps_per_obs,),
-                    (num_middle, num_obs_per_subseq * num_steps_per_obs),
-                    (final_subseq_size * num_steps_per_obs,),
+                num_middle = num_full - 1 if num_remaining == 0 else num_full
+                final_subseq_size = (
+                    num_obs_per_subseq if num_remaining == 0 else num_remaining
                 )
-            )
+                y_subseq_shapes.append(
+                    ((init_subseq_size,),)
+                    + (((num_middle, num_obs_per_subseq),) if num_middle > 0 else ())
+                    + ((final_subseq_size,),)
+                )
+                v_subseq_shapes.append(
+                    ((init_subseq_size * num_steps_per_obs,),)
+                    + (
+                        ((num_middle, num_obs_per_subseq * num_steps_per_obs),)
+                        if num_middle > 0
+                        else ()
+                    )
+                    + ((final_subseq_size * num_steps_per_obs,),)
+                )
+                subseqs_are_batched.append(
+                    (False, True, False) if num_middle > 0 else (False, False)
+                )
         y_subseqs = [split_and_reshape(y_seq, shapes) for shapes in y_subseq_shapes]
         noisy_observations = generate_σ is not None
         dim_v_0 = dim_x if dim_v_0 is None else dim_v_0
@@ -239,6 +243,7 @@ class ConditionedDiffusionConstrainedSystem(System):
         self.y_seq = y_seq
         self.obs_indices = obs_indices
         self.y_subseqs = y_subseqs
+        self.num_partition = len(y_subseqs)
 
         @api.jit
         def step_func(z, x, v):
@@ -260,14 +265,14 @@ class ConditionedDiffusionConstrainedSystem(System):
             _, x_seq = lax.scan(lambda x, v: step_func(z, x, v), x_0, v_seq)
             return x_seq[obs_indices]
 
-        def generate_y_bar(z, w_0, v_seq, σ_n_seq, b):
+        def generate_y_bar(z, w_0, v_seq, σ_n_seq, initial_subseq, final_subseq):
             """Generate partial observation subsequence."""
-            x_0 = generate_x_0(z, w_0) if b == 0 else w_0
+            x_0 = generate_x_0(z, w_0) if initial_subseq else w_0
             _, x_seq = lax.scan(lambda x, v: step_func(z, x, v), x_0, v_seq)
-            y_seq = obs_func(x_seq[obs_indices])
+            y_seq_mean = obs_func(x_seq[obs_indices])
             if noisy_observations:
-                y_seq = y_seq + σ_n_seq
-            if b == 2:
+                y_seq = y_seq_mean + σ_n_seq
+            if final_subseq:
                 return y_seq.flatten()
             elif noisy_observations:
                 return np.concatenate((y_seq.flatten(), x_seq[-1]))
@@ -283,32 +288,55 @@ class ConditionedDiffusionConstrainedSystem(System):
             subsequences plus initial and final 'half' subsequences.
             """
             end_y = None if noisy_observations else -1
+            partition_size = len(y_subseq_shapes[partition])
             v_subseqs = split_and_reshape(v_seq, v_subseq_shapes[partition])
             if noisy_observations:
                 n_subseqs = split_and_reshape(n_seq, y_subseq_shapes[partition])
             else:
-                n_subseqs = (None,) * len(y_subseq_shapes[partition])
+                n_subseqs = (None,) * len(partition_size)
             x_obs_subseqs = split_and_reshape(x_obs_seq, y_subseq_shapes[partition])
-            w_inits = (
-                v_0,
-                np.concatenate((x_obs_subseqs[0][-1:], x_obs_subseqs[1][:-1, -1]), 0),
-                x_obs_subseqs[1][-1, -1],
-            )
-            y_bars = (
-                np.concatenate(
-                    (y_subseqs[partition][0][:end_y].flatten(), x_obs_subseqs[0][-1])
-                ),
-                np.concatenate(
-                    (
-                        y_subseqs[partition][1][:, :end_y].reshape(
-                            (y_subseqs[partition][1].shape[0], -1)
-                        ),
-                        x_obs_subseqs[1][:, -1],
-                    ),
-                    -1,
-                ),
-                y_subseqs[partition][2].flatten(),
-            )
+            w_inits = [v_0]
+            prev_batched = False
+            for b in range(1, partition_size):
+                if subseqs_are_batched[partition][b]:
+                    w_inits.append(
+                        np.vstack(
+                            [
+                                x_obs_subseqs[b - 1][(-1, -1) if prev_batched else -1],
+                                x_obs_subseqs[b][:-1, -1],
+                            ]
+                        )
+                    )
+                    prev_batched = True
+                else:
+                    w_inits.append(
+                        x_obs_subseqs[b - 1][(-1, -1) if prev_batched else (-1,)]
+                    )
+                    prev_batched = False
+            y_bars = []
+            for b in range(0, partition_size - 1):
+                if subseqs_are_batched[partition][b]:
+                    y_bars.append(
+                        np.concatenate(
+                            (
+                                y_subseqs[partition][b][:, :end_y].reshape(
+                                    (y_subseqs[partition][b].shape[0], -1)
+                                ),
+                                x_obs_subseqs[b][:, -1],
+                            ),
+                            -1,
+                        )
+                    )
+                else:
+                    y_bars.append(
+                        np.concatenate(
+                            (
+                                y_subseqs[partition][b][:end_y].flatten(),
+                                x_obs_subseqs[b][-1],
+                            )
+                        )
+                    )
+            y_bars.append(y_subseqs[partition][-1].flatten())
             return v_subseqs, n_subseqs, w_inits, y_bars
 
         @api.partial(api.jit, static_argnums=(2,))
@@ -327,26 +355,35 @@ class ConditionedDiffusionConstrainedSystem(System):
             (v_subseqs, n_subseqs, w_inits, y_bars) = partition_into_subseqs(
                 v_seq, v_0, n_seq, x_obs_seq, partition
             )
-            gen_funcs = (
-                generate_y_bar,
+            partition_size = len(v_subseqs)
+            gen_funcs = [
                 api.vmap(
                     generate_y_bar,
-                    (None, 0, 0, 0 if noisy_observations else None, None),
-                ),
-                generate_y_bar,
-            )
+                    (None, 0, 0, 0 if noisy_observations else None, None, None),
+                )
+                if is_batched
+                else generate_y_bar
+                for is_batched in subseqs_are_batched[partition]
+            ]
             if noisy_observations:
                 σ = generate_σ(u)
-                σ_n_subseqs = tuple(σ * n_subseqs[i] for i in range(3))
+                σ_n_subseqs = [σ * n_subseq for n_subseq in n_subseqs]
             else:
-                σ_n_subseqs = (None,) * 3
+                σ_n_subseqs = (None,) * len(partition_size)
             return np.concatenate(
                 [
                     (
-                        gen_funcs[b](z, w_inits[b], v_subseqs[b], σ_n_subseqs[b], b)
+                        gen_funcs[b](
+                            z,
+                            w_inits[b],
+                            v_subseqs[b],
+                            σ_n_subseqs[b],
+                            b == 0,
+                            b == partition_size - 1,
+                        )
                         - y_bars[b]
                     ).flatten()
-                    for b in range(3)
+                    for b in range(partition_size)
                 ]
             )
 
@@ -426,17 +463,17 @@ class ConditionedDiffusionConstrainedSystem(System):
             where `∂₁c₁(u, v₁, n₁)` ad `∂₂c₁(u, v₁, n₁)` are both block diagonal.
             """
 
-            def g_y_bar(u, v, n, w_0, b):
+            def g_y_bar(u, v, n, w_0, initial_subseq, final_subseq):
                 z = generate_z(u)
                 if noisy_observations:
                     σ = generate_σ(u)
                     σ_n = σ * n
                 else:
                     σ_n = None
-                if b == 0:
+                if initial_subseq:
                     w_0, v = split(v, (dim_v_0,))
                 v_seq = v.reshape((-1, dim_v))
-                return generate_y_bar(z, w_0, v_seq, σ_n, b)
+                return generate_y_bar(z, w_0, v_seq, σ_n, initial_subseq, final_subseq)
 
             if noisy_observations:
                 u, v_0, v_seq_flat, n_flat = split(
@@ -450,33 +487,45 @@ class ConditionedDiffusionConstrainedSystem(System):
             (v_subseqs, n_subseqs, w_inits, _) = partition_into_subseqs(
                 v_seq, v_0, n_seq, x_obs_seq, partition
             )
-            v_bars = (
-                np.concatenate([v_0, v_subseqs[0].flatten()]),
-                v_subseqs[1].reshape((v_subseqs[1].shape[0], -1)),
-                v_subseqs[2].flatten(),
-            )
+            partition_size = len(v_subseqs)
+            v_bars = [np.concatenate([v_0, v_subseqs[0].flatten()])]
+            for b in range(1, partition_size):
+                v_bars.append(
+                    v_subseqs[b].reshape((v_subseqs[b].shape[0], -1))
+                    if subseqs_are_batched[partition][b]
+                    else v_subseqs[b].flatten()
+                )
             jacob_g_y_bar = api.jacrev(g_y_bar, (0, 1))
-            jacob_funcs = (
-                jacob_g_y_bar,
+            jacob_funcs = [
                 api.vmap(
-                    jacob_g_y_bar, (None, 0, 0 if noisy_observations else None, 0, None)
-                ),
-                jacob_g_y_bar,
-            )
+                    jacob_g_y_bar,
+                    (None, 0, 0 if noisy_observations else None, 0, None, None),
+                )
+                if is_batched
+                else jacob_g_y_bar
+                for is_batched in subseqs_are_batched[partition]
+            ]
             if noisy_observations:
                 σ = generate_σ(u)
                 dc_dn_blocks = tuple(
-                    (σ * np.ones_like(n_subseqs[i])).reshape(
-                        (n_subseqs[i].shape[0], -1) if i == 1 else (-1,)
+                    (σ * np.ones_like(n_subseqs[b])).reshape(
+                        (n_subseqs[b].shape[0], -1) if is_batched else (-1,)
                     )
-                    for i in range(3)
+                    for b, is_batched in enumerate(subseqs_are_batched[partition])
                 )
             else:
-                dc_dn_blocks = (None,) * 3
+                dc_dn_blocks = (None,) * partition_size
             dc_du_blocks, dc_dv_blocks = zip(
                 *(
-                    jacob_funcs[b](u, v_bars[b], n_subseqs[b], w_inits[b], b)
-                    for b in range(3)
+                    jacob_funcs[b](
+                        u,
+                        v_bars[b],
+                        n_subseqs[b],
+                        w_inits[b],
+                        b == 0,
+                        b == partition_size - 1,
+                    )
+                    for b in range(partition_size)
                 )
             )
             return dc_du_blocks, dc_dv_blocks, dc_dn_blocks
@@ -526,17 +575,20 @@ class ConditionedDiffusionConstrainedSystem(System):
             D_blocks = compute_D_blocks(
                 dc_dv_blocks, dc_dn_blocks, dc_dv_blocks, dc_dn_blocks
             )
-            chol_D_blocks = tuple(nla.cholesky(D_blocks[i]) for i in range(3))
+            chol_D_blocks = tuple(nla.cholesky(D_block) for D_block in D_blocks)
             D_inv_dc_du_blocks = tuple(
-                sla.cho_solve((chol_D_blocks[i], True), dc_du_blocks[i])
-                for i in range(3)
+                sla.cho_solve((chol_D_block, True), dc_du_block)
+                for chol_D_block, dc_du_block in zip(chol_D_blocks, dc_du_blocks)
             )
             chol_C = nla.cholesky(
                 M_0
-                + (
-                    dc_du_blocks[0].T @ D_inv_dc_du_blocks[0]
-                    + np.einsum("ijk,ijl->kl", dc_du_blocks[1], D_inv_dc_du_blocks[1])
-                    + dc_du_blocks[2].T @ D_inv_dc_du_blocks[2]
+                + sum(
+                    dc_du_block.T @ D_inv_dc_du_block
+                    if dc_du_block.ndim == 2
+                    else np.einsum("ijk,ijl->kl", dc_du_block, D_inv_dc_du_block)
+                    for dc_du_block, D_inv_dc_du_block in zip(
+                        dc_du_blocks, D_inv_dc_du_blocks
+                    )
                 )
             )
             return chol_C, chol_D_blocks
@@ -597,25 +649,22 @@ class ConditionedDiffusionConstrainedSystem(System):
             D_blocks = compute_D_blocks(
                 dc_dv_l_blocks, dc_dn_l_blocks, dc_dv_r_blocks, dc_dn_r_blocks
             )
-            lu_and_piv_D_blocks = tuple(sla.lu_factor(D_blocks[i]) for i in range(3))
+            lu_and_piv_D_blocks = tuple(sla.lu_factor(D_block) for D_block in D_blocks)
             D_inv_dc_du_l_blocks = tuple(
-                sla.lu_solve(lu_and_piv_D_blocks[i], dc_du_l_blocks[i])
-                for i in range(3)
+                sla.lu_solve(lu_and_piv_D_block, dc_du_l_block)
+                for lu_and_piv_D_block, dc_du_l_block in zip(
+                    lu_and_piv_D_blocks, dc_du_l_blocks
+                )
             )
-            # + sum(
-            #     dc_du_r_block.T @ D_inv_dc_du_l_block if dc_du_r_block.ndim == 2
-            #     else np.einsum('ijk,ijl->kl' dc_du_r_block, D_inv_dc_du_l_block)
-            #     for dc_du_r_block, D_inv_dc_du_l_block in
-            #     zip(dc_du_r_blocks, D_inv_dc_du_l_blocks)
-            # )
             lu_and_piv_C = sla.lu_factor(
                 M_0
-                + (
-                    dc_du_r_blocks[0].T @ D_inv_dc_du_l_blocks[0]
-                    + np.einsum(
-                        "ijk,ijl->kl", dc_du_r_blocks[1], D_inv_dc_du_l_blocks[1]
+                + sum(
+                    dc_du_r_block.T @ D_inv_dc_du_l_block
+                    if dc_du_r_block.ndim == 2
+                    else np.einsum("ijk,ijl->kl", dc_du_r_block, D_inv_dc_du_l_block)
+                    for dc_du_r_block, D_inv_dc_du_l_block in zip(
+                        dc_du_r_blocks, D_inv_dc_du_l_blocks
                     )
-                    + dc_du_r_blocks[2].T @ D_inv_dc_du_l_blocks[2]
                 )
             )
             return lu_and_piv_C, lu_and_piv_D_blocks
@@ -623,64 +672,29 @@ class ConditionedDiffusionConstrainedSystem(System):
         def compute_D_blocks(
             dc_dv_l_blocks, dc_dn_l_blocks, dc_dv_r_blocks, dc_dn_r_blocks
         ):
-            if isinstance(metric, IdentityMatrix) or isinstance(
-                metric.blocks[1], IdentityMatrix
-            ):
-                dc_dv_l_inv_M_1_blocks = dc_dv_l_blocks
-            elif isinstance(metric.blocks[1], PositiveScaledIdentityMatrix):
-                scalar = metric.blocks[1].scalar
-                dc_dv_l_inv_M_1_blocks = tuple(
-                    dc_dv_l_blocks[i] / scalar for i in range(3)
-                )
-            else:
-                M_1_diag = metric.blocks[1].diagonal
-                M_1_diag_blocks = split(
-                    M_1_diag,
-                    (
-                        dc_dv_l_blocks[0].shape[1],
-                        dc_dv_l_blocks[1].shape[0] * dc_dv_l_blocks[1].shape[2],
-                    ),
-                )
-                M_1_diag_blocks[1] = M_1_diag_blocks[1].reshape(
-                    (dc_dv_l_blocks[1].shape[0], dc_dv_l_blocks[1].shape[2])
-                )
-                dc_dv_l_inv_M_1_blocks = (
-                    dc_dv_l_blocks[i] / M_1_diag_blocks[i][..., None, :]
-                    for i in range(3)
-                )
             D_blocks = [
-                np.einsum("...ij,...kj", dc_dv_l_inv_M_1_blocks[i], dc_dv_r_blocks[i])
-                for i in range(3)
+                np.einsum("...ij,...kj", dc_dv_l_block, dc_dv_r_block)
+                for dc_dv_l_block, dc_dv_r_block in zip(dc_dv_l_blocks, dc_dv_r_blocks)
             ]
             if noisy_observations:
-                d0, d2 = D_blocks[0].shape[0], D_blocks[2].shape[0]
-                d1 = D_blocks[1].shape[:2]
-                D_blocks[0] = (
-                    D_blocks[0]
-                    .at[np.diag_indices(d0)]
-                    .add(
-                        np.concatenate(
-                            [dc_dn_l_blocks[0] * dc_dn_r_blocks[0], np.zeros(dim_x)]
-                        )
-                    )
-                )
-                D_blocks[1] = (
-                    D_blocks[1]
-                    .at[(...,) + np.diag_indices(d1[1])]
-                    .add(
+                for b, (D_block, dc_dn_l_block, dc_dn_r_block) in enumerate(
+                    zip(D_blocks[:-1], dc_dn_l_blocks[:-1], dc_dn_r_blocks[:-1])
+                ):
+                    D_blocks[b] = D_block.at[
+                        (...,) + np.diag_indices(D_block.shape[-2])
+                    ].add(
                         np.concatenate(
                             [
-                                dc_dn_l_blocks[1] * dc_dn_r_blocks[1],
-                                np.zeros((d1[0], dim_x)),
+                                dc_dn_l_block * dc_dn_r_block,
+                                np.zeros(D_block.shape[-3:-2] + (dim_x,)),
                             ],
-                            1,
+                            axis=-1,
                         )
                     )
-                )
-                D_blocks[2] = (
-                    D_blocks[2]
-                    .at[np.diag_indices(d2)]
-                    .add(dc_dn_l_blocks[2] * dc_dn_r_blocks[2])
+                D_blocks[-1] = (
+                    D_blocks[-1]
+                    .at[np.diag_indices(D_blocks[-1].shape[0])]
+                    .add(dc_dn_l_blocks[-1] * dc_dn_r_blocks[-1])
                 )
             return D_blocks
 
@@ -695,8 +709,8 @@ class ConditionedDiffusionConstrainedSystem(System):
             """Calculate log-determinant of Gram matrix from block Cholesky factors."""
             return (
                 sum(
-                    np.log(np.abs(chol_D_blocks[i].diagonal(0, -2, -1))).sum()
-                    for i in range(3)
+                    np.log(np.abs(chol_D_block.diagonal(0, -2, -1))).sum()
+                    for chol_D_block in chol_D_blocks
                 )
                 + np.log(np.abs(chol_C.diagonal())).sum()
                 - log_det_sqrt_metric_0
@@ -721,76 +735,85 @@ class ConditionedDiffusionConstrainedSystem(System):
                 )
             else:
                 vct_u, vct_v = split(vct, (dim_u,))
-            n_block_1 = dc_dv_blocks[1].shape[0]
-            j0, j2 = (
-                dc_dv_blocks[0].shape[1],
-                dc_dv_blocks[2].shape[1],
+            vct_v_parts = split_and_reshape(
+                vct_v,
+                [
+                    dc_dv_block.shape[0:3:2]
+                    if dc_dv_block.ndim == 3
+                    else dc_dv_block.shape[1:2]
+                    for dc_dv_block in dc_dv_blocks
+                ],
             )
-            k0, k2 = (
-                dc_dv_blocks[0].shape[0] - dim_x,
-                dc_dv_blocks[2].shape[0],
+            dc_du = np.vstack(
+                [
+                    dc_du_block.reshape((-1, dim_u))
+                    if dc_du_block.ndim == 3
+                    else dc_du_block
+                    for dc_du_block in dc_du_blocks
+                ]
             )
-            jacob_vct = np.vstack(
-                (dc_du_blocks[0], dc_du_blocks[1].reshape((-1, dim_u)), dc_du_blocks[2])
-            ) @ vct_u + np.concatenate(
-                (
-                    dc_dv_blocks[0] @ vct_v[:j0],
-                    np.einsum(
-                        "ijk,ik->ij",
-                        dc_dv_blocks[1],
-                        vct_v[j0:-j2].reshape((n_block_1, -1)),
-                    ).flatten(),
-                    dc_dv_blocks[2] @ vct_v[-j2:],
-                )
+            jacob_vct = dc_du @ vct_u + np.concatenate(
+                [
+                    np.einsum("ijk,ik->ij", dc_dv_block, vct_v_part,).flatten()
+                    if dc_dv_block.ndim == 3
+                    else dc_dv_block @ vct_v_part
+                    for dc_dv_block, vct_v_part in zip(dc_dv_blocks, vct_v_parts)
+                ]
             )
             if noisy_observations:
+                vct_n_parts = split_and_reshape(
+                    vct_n, [dc_dn_block.shape for dc_dn_block in dc_dn_blocks]
+                )
                 jacob_vct += np.concatenate(
                     [
-                        dc_dn_blocks[0] * vct_n[:k0],
-                        np.zeros(dim_x),
                         np.concatenate(
                             [
-                                dc_dn_blocks[1]
-                                * vct_n[k0:-k2].reshape((n_block_1, -1)),
-                                np.zeros((n_block_1, dim_x)),
+                                dc_dn_block * vct_n_part,
+                                np.zeros((dc_dn_block.shape[0], dim_x)),
                             ],
-                            1,
-                        ).flatten(),
-                        dc_dn_blocks[2] * vct_n[-k2:],
+                            axis=1,
+                        ).flatten()
+                        if dc_dn_block.ndim == 2
+                        else np.concatenate([dc_dn_block * vct_n_part, np.zeros(dim_x)])
+                        for dc_dn_block, vct_n_part in zip(
+                            dc_dn_blocks[:-1], vct_n_parts[:-1]
+                        )
                     ]
+                    + [dc_dn_blocks[-1] * vct_n_parts[-1]]
                 )
             return jacob_vct
 
         @api.jit
         def rmult_by_jacob_constr(dc_du_blocks, dc_dv_blocks, dc_dn_blocks, vct):
             """Right-multiply vector by constraint Jacobian matrix."""
-            vct_parts = split(
-                vct,
-                (
-                    dc_du_blocks[0].shape[0],
-                    dc_du_blocks[1].shape[0] * dc_du_blocks[1].shape[1],
-                ),
+            vct_parts = split_and_reshape(
+                vct, [dc_du_block.shape[:-1] for dc_du_block in dc_du_blocks]
             )
-            vct_parts[1] = vct_parts[1].reshape(dc_du_blocks[1].shape[:2])
             return np.concatenate(
                 [
-                    vct_parts[0] @ dc_du_blocks[0]
-                    + np.einsum("ij,ijk->k", vct_parts[1], dc_du_blocks[1])
-                    + vct_parts[2] @ dc_du_blocks[2],
-                    vct_parts[0] @ dc_dv_blocks[0],
-                    np.einsum("ij,ijk->ik", vct_parts[1], dc_dv_blocks[1]).flatten(),
-                    vct_parts[2] @ dc_dv_blocks[2],
+                    sum(
+                        np.einsum("ij,ijk->k", vct_part, dc_du_block)
+                        if vct_part.ndim == 2
+                        else vct_part @ dc_du_block
+                        for vct_part, dc_du_block in zip(vct_parts, dc_du_blocks)
+                    )
+                ]
+                + [
+                    np.einsum("ij,ijk->ik", vct_part, dc_dv_block).flatten()
+                    if vct_part.ndim == 2
+                    else vct_part @ dc_dv_block
+                    for vct_part, dc_dv_block in zip(vct_parts, dc_dv_blocks)
                 ]
                 + (
                     [
-                        np.concatenate(
-                            [
-                                dc_dn_blocks[0] * vct_parts[0][:-dim_x],
-                                (dc_dn_blocks[1] * vct_parts[1][:, :-dim_x]).flatten(),
-                                dc_dn_blocks[2] * vct_parts[2],
-                            ]
+                        (vct_part[:, :-dim_x] * dc_dn_block).flatten()
+                        if vct_part.ndim == 2
+                        else vct_part[:-dim_x] * dc_dn_block
+                        for vct_part, dc_dn_block in zip(
+                            vct_parts[:-1], dc_dn_blocks[:-1]
                         )
                     ]
+                    + [vct_parts[-1] * dc_dn_blocks[-1]]
                     if noisy_observations
                     else []
                 )
@@ -801,29 +824,27 @@ class ConditionedDiffusionConstrainedSystem(System):
             dc_du_blocks, dc_dv_blocks, dc_dn_blocks, chol_C, chol_D_blocks, vct
         ):
             """Left-multiply vector by inverse Gram matrix."""
-            vct_parts = split(
-                vct,
-                (
-                    dc_du_blocks[0].shape[0],
-                    dc_du_blocks[1].shape[0] * dc_du_blocks[1].shape[1],
-                ),
+            vct_parts = split_and_reshape(
+                vct, [dc_du_block.shape[:-1] for dc_du_block in dc_du_blocks]
             )
-            vct_parts[1] = np.reshape(vct_parts[1], dc_du_blocks[1].shape[:2])
-            D_inv_vct_blocks = tuple(
-                sla.cho_solve((chol_D_blocks[i], True), vct_parts[i]) for i in range(3)
-            )
+            D_inv_vct_blocks = [
+                sla.cho_solve((chol_D_block, True), vct_part)
+                for chol_D_block, vct_part in zip(chol_D_blocks, vct_parts)
+            ]
             dc_du_T_D_inv_vct = sum(
-                np.einsum("...jk,...j->k", dc_du_blocks[i], D_inv_vct_blocks[i])
-                for i in range(3)
+                np.einsum("...jk,...j->k", dc_du_block, D_inv_vct_block)
+                for dc_du_block, D_inv_vct_block in zip(dc_du_blocks, D_inv_vct_blocks)
             )
             C_inv_dc_du_T_D_inv_vct = sla.cho_solve((chol_C, True), dc_du_T_D_inv_vct)
             return np.concatenate(
                 [
                     sla.cho_solve(
-                        (chol_D_blocks[i], True),
-                        vct_parts[i] - dc_du_blocks[i] @ C_inv_dc_du_T_D_inv_vct,
+                        (chol_D_block, True),
+                        vct_part - dc_du_block @ C_inv_dc_du_T_D_inv_vct,
                     ).flatten()
-                    for i in range(3)
+                    for chol_D_block, vct_part, dc_du_block in zip(
+                        chol_D_blocks, vct_parts, dc_du_blocks
+                    )
                 ]
             )
 
@@ -840,29 +861,29 @@ class ConditionedDiffusionConstrainedSystem(System):
             vct,
         ):
             """Left-multiply vector by inverse of Jacobian product matrix."""
-            vct_parts = split(
-                vct,
-                (
-                    dc_du_l_blocks[0].shape[0],
-                    dc_du_l_blocks[1].shape[0] * dc_du_l_blocks[1].shape[1],
-                ),
+            vct_parts = split_and_reshape(
+                vct, [dc_du_l_block.shape[:-1] for dc_du_l_block in dc_du_l_blocks]
             )
-            vct_parts[1] = np.reshape(vct_parts[1], dc_du_l_blocks[1].shape[:2])
-            D_inv_vct_blocks = tuple(
-                sla.lu_solve(lu_and_piv_D_blocks[i], vct_parts[i]) for i in range(3)
-            )
+            D_inv_vct_blocks = [
+                sla.lu_solve(lu_and_piv_D_block, vct_part)
+                for lu_and_piv_D_block, vct_part in zip(lu_and_piv_D_blocks, vct_parts)
+            ]
             dc_du_r_T_D_inv_vct = sum(
-                np.einsum("...jk,...j->k", dc_du_r_blocks[i], D_inv_vct_blocks[i])
-                for i in range(3)
+                np.einsum("...jk,...j->k", dc_du_r_block, D_inv_vct_block)
+                for dc_du_r_block, D_inv_vct_block in zip(
+                    dc_du_r_blocks, D_inv_vct_blocks
+                )
             )
             C_inv_dc_du_r_T_D_inv_vct = sla.lu_solve(lu_and_piv_C, dc_du_r_T_D_inv_vct)
             return np.concatenate(
                 [
                     sla.lu_solve(
-                        lu_and_piv_D_blocks[i],
-                        vct_parts[i] - dc_du_l_blocks[i] @ C_inv_dc_du_r_T_D_inv_vct,
+                        lu_and_piv_D_block,
+                        vct_part - dc_du_l_block @ C_inv_dc_du_r_T_D_inv_vct,
                     ).flatten()
-                    for i in range(3)
+                    for lu_and_piv_D_block, vct_part, dc_du_l_block in zip(
+                        lu_and_piv_D_blocks, vct_parts, dc_du_l_blocks
+                    )
                 ]
             )
 
@@ -1136,21 +1157,22 @@ class ConditionedDiffusionConstrainedSystem(System):
 class SwitchPartitionTransition(Transition):
     """Markov transition that deterministically switches conditioned partition.
 
-    The `partition` binary variable in the chain state, which sets the current
-    partition used when conditioning on values of the diffusion process at
-    intermediate time, is deterministically switched on each transition as well
-    as updating the cached observed state sequence based on the current position
-    state component.
+    The `partition` integer variable in the chain state, which sets the current
+    partition used when conditioning on values of the diffusion process at intermediate
+    time, is deterministically circularly incremented on each transition as well as
+    updating the cached observed state sequence based on the current position state
+    component.
     """
 
     def __init__(self, system):
         self.system = system
+        self.num_partition = system.num_partition
 
     state_variables = {"partition", "x_obs_seq"}
     statistic_types = None
 
     def sample(self, state, rng):
-        state.partition = 0 if state.partition == 1 else 1
+        state.partition = (state.partition + 1) % self.num_partition
         self.system.update_x_obs_seq(state)
         return state, None
 
