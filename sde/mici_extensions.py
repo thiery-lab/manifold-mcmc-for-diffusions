@@ -37,6 +37,19 @@ def split(v, lengths):
     return parts
 
 
+def split_and_reshape(array, shapes):
+    """Split an array along first dimension into subarrays of specified shapes."""
+    i = 0
+    parts = []
+    for s in shapes:
+        j = onp.product(s)
+        parts.append(array[i : i + j].reshape(s + array.shape[1:]))
+        i += j
+    if i < array.shape[0]:
+        parts.append(array[i:])
+    return parts
+
+
 def standard_normal_neg_log_dens(q):
     """Unnormalised negative log density of standard normal vector."""
     return 0.5 * onp.sum(q ** 2)
@@ -177,24 +190,33 @@ class ConditionedDiffusionConstrainedSystem(System):
 
         num_obs, dim_y = y_seq.shape
         δ = obs_interval / num_steps_per_obs
-        if num_obs % num_obs_per_subseq != 0:
-            raise NotImplementedError(
-                "Only cases where num_obs_per_subseq is a factor of num_obs "
-                "supported."
-            )
-        num_subseq = num_obs // num_obs_per_subseq
         num_step = num_obs * num_steps_per_obs
         obs_indices = slice(num_steps_per_obs - 1, None, num_steps_per_obs)
-        num_step_per_subseq = num_obs_per_subseq * num_steps_per_obs
-        y_subseqs_p0 = np.reshape(y_seq, (num_subseq, num_obs_per_subseq, -1))
-        y_subseqs_p1 = split(
-            y_seq, (num_obs_per_subseq // 2, num_obs - num_obs_per_subseq)
-        )
-        y_subseqs_p1[1] = np.reshape(
-            y_subseqs_p1[1], (num_subseq - 1, num_obs_per_subseq, dim_y)
-        )
+        y_subseq_shapes, v_subseq_shapes = [], []
+        for init_subseq_size in [num_obs_per_subseq, num_obs_per_subseq // 2]:
+            num_full, num_remaining = divmod(
+                num_obs - init_subseq_size, num_obs_per_subseq
+            )
+            num_middle = num_full - 1 if num_remaining == 0 else num_full
+            final_subseq_size = (
+                num_obs_per_subseq if num_remaining == 0 else num_remaining
+            )
+            y_subseq_shapes.append(
+                (
+                    (init_subseq_size,),
+                    (num_middle, num_obs_per_subseq),
+                    (final_subseq_size,),
+                )
+            )
+            v_subseq_shapes.append(
+                (
+                    (init_subseq_size * num_steps_per_obs,),
+                    (num_middle, num_obs_per_subseq * num_steps_per_obs),
+                    (final_subseq_size * num_steps_per_obs,),
+                )
+            )
+        y_subseqs = [split_and_reshape(y_seq, shapes) for shapes in y_subseq_shapes]
         noisy_observations = generate_σ is not None
-        dim_y = y_seq.shape[-1]
         dim_v_0 = dim_x if dim_v_0 is None else dim_v_0
         self.dim_u = dim_u
         self.dim_v = dim_v
@@ -216,6 +238,7 @@ class ConditionedDiffusionConstrainedSystem(System):
         self.δ = δ
         self.y_seq = y_seq
         self.obs_indices = obs_indices
+        self.y_subseqs = y_subseqs
 
         @api.jit
         def step_func(z, x, v):
@@ -260,79 +283,32 @@ class ConditionedDiffusionConstrainedSystem(System):
             subsequences plus initial and final 'half' subsequences.
             """
             end_y = None if noisy_observations else -1
-            if not noisy_observations:
-                n_subseqs = (None,) * 3
-            if partition == 0:
-                v_subseqs = v_seq.reshape((num_subseq, num_step_per_subseq, dim_v))
-                v_subseqs = (v_subseqs[0], v_subseqs[1:-1], v_subseqs[-1])
-                if noisy_observations:
-                    n_subseqs = n_seq.reshape((num_subseq, num_obs_per_subseq, dim_y))
-                    n_subseqs = (n_subseqs[0], n_subseqs[1:-1], n_subseqs[-1])
-                x_obs_subseqs = x_obs_seq.reshape(
-                    (num_subseq, num_obs_per_subseq, dim_x)
-                )
-                w_inits = (v_0, x_obs_subseqs[:-2, -1], x_obs_subseqs[-2, -1])
-                y_bars = (
-                    np.concatenate(
-                        (y_subseqs_p0[0, :end_y].flatten(), x_obs_subseqs[0, -1])
-                    ),
-                    np.concatenate(
-                        (
-                            y_subseqs_p0[1:-1, :end_y].reshape((num_subseq - 2, -1)),
-                            x_obs_subseqs[1:-1, -1],
-                        ),
-                        -1,
-                    ),
-                    y_subseqs_p0[-1].flatten(),
-                )
+            v_subseqs = split_and_reshape(v_seq, v_subseq_shapes[partition])
+            if noisy_observations:
+                n_subseqs = split_and_reshape(n_seq, y_subseq_shapes[partition])
             else:
-                v_subseqs = split(
-                    v_seq,
+                n_subseqs = (None,) * len(y_subseq_shapes[partition])
+            x_obs_subseqs = split_and_reshape(x_obs_seq, y_subseq_shapes[partition])
+            w_inits = (
+                v_0,
+                np.concatenate((x_obs_subseqs[0][-1:], x_obs_subseqs[1][:-1, -1]), 0),
+                x_obs_subseqs[1][-1, -1],
+            )
+            y_bars = (
+                np.concatenate(
+                    (y_subseqs[partition][0][:end_y].flatten(), x_obs_subseqs[0][-1])
+                ),
+                np.concatenate(
                     (
-                        (num_obs_per_subseq // 2) * num_steps_per_obs,
-                        num_step_per_subseq * (num_subseq - 1),
-                    ),
-                )
-                v_subseqs[1] = v_subseqs[1].reshape(
-                    (num_subseq - 1, num_step_per_subseq, dim_v)
-                )
-                if noisy_observations:
-                    n_subseqs = split(
-                        n_seq,
-                        (
-                            (num_obs_per_subseq // 2),
-                            num_obs_per_subseq * (num_subseq - 1),
+                        y_subseqs[partition][1][:, :end_y].reshape(
+                            (y_subseqs[partition][1].shape[0], -1)
                         ),
-                    )
-                    n_subseqs[1] = n_subseqs[1].reshape(
-                        (num_subseq - 1, num_obs_per_subseq, dim_y)
-                    )
-                x_obs_subseqs = split(
-                    x_obs_seq, (num_obs_per_subseq // 2, num_obs - num_obs_per_subseq)
-                )
-                x_obs_subseqs[1] = x_obs_subseqs[1].reshape(
-                    (num_subseq - 1, num_obs_per_subseq, dim_x)
-                )
-                w_inits = (
-                    v_0,
-                    np.concatenate(
-                        (x_obs_subseqs[0][-1:], x_obs_subseqs[1][:-1, -1]), 0
+                        x_obs_subseqs[1][:, -1],
                     ),
-                    x_obs_subseqs[1][-1, -1],
-                )
-                y_bars = (
-                    np.concatenate(
-                        (y_subseqs_p1[0][:end_y].flatten(), x_obs_subseqs[0][-1])
-                    ),
-                    np.concatenate(
-                        (
-                            y_subseqs_p1[1][:, :end_y].reshape((num_subseq - 1, -1)),
-                            x_obs_subseqs[1][:, -1],
-                        ),
-                        -1,
-                    ),
-                    y_subseqs_p1[2].flatten(),
-                )
+                    -1,
+                ),
+                y_subseqs[partition][2].flatten(),
+            )
             return v_subseqs, n_subseqs, w_inits, y_bars
 
         @api.partial(api.jit, static_argnums=(2,))
@@ -626,6 +602,12 @@ class ConditionedDiffusionConstrainedSystem(System):
                 sla.lu_solve(lu_and_piv_D_blocks[i], dc_du_l_blocks[i])
                 for i in range(3)
             )
+            # + sum(
+            #     dc_du_r_block.T @ D_inv_dc_du_l_block if dc_du_r_block.ndim == 2
+            #     else np.einsum('ijk,ijl->kl' dc_du_r_block, D_inv_dc_du_l_block)
+            #     for dc_du_r_block, D_inv_dc_du_l_block in
+            #     zip(dc_du_r_blocks, D_inv_dc_du_l_blocks)
+            # )
             lu_and_piv_C = sla.lu_factor(
                 M_0
                 + (
