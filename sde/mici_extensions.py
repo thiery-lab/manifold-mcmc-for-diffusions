@@ -1,4 +1,5 @@
 import logging
+from numbers import Number
 import numpy as onp
 import jax.numpy as np
 import jax.numpy.linalg as nla
@@ -14,7 +15,7 @@ from mici.matrices import PositiveDefiniteBlockDiagonalMatrix, IdentityMatrix
 from mici.transitions import Transition
 from mici.states import ChainState, _cache_key_func
 from mici.solvers import maximum_norm
-from mici.errors import ConvergenceError
+from mici.errors import ConvergenceError, HamiltonianDivergenceError
 
 
 logger = logging.getLogger(__name__)
@@ -69,6 +70,87 @@ def convert_to_numpy_pytree(jax_pytree):
         return {k: convert_to_numpy_pytree(v) for k, v in jax_pytree.items()}
     else:
         raise ValueError(f"Unknown jax_pytree node type {type(jax_pytree)}")
+
+
+def conditioned_diffusion_neg_log_dens_and_grad(
+    obs_interval,
+    num_steps_per_obs,
+    y_seq,
+    dim_u,
+    dim_v_0,
+    dim_v,
+    forward_func,
+    generate_x_0,
+    generate_z,
+    generate_σ,
+    obs_func,
+    use_gaussian_splitting=False,
+):
+    """Construct negative log target density + gradient functions for diffusion model.
+
+    Constructs functions evaluating the negative logarithm of the unnormalised posterior
+    density with respect to the Lebesgue measure for a partially observed diffusion
+    model with additive Gaussian noise in the observations as well as a function to
+    evaluate the gradient of this negative log density. These functions can be used
+    with a Mici `EuclideanMetricSystem` system class to allow using HMC to perform
+    inference in the model.
+
+    A non-centred parameterisation of the model is used with the latent state `q`
+    assumed to have a prior distribution specified by a product of independent standard
+    normal factors, with `q` being the concatenation of a vector `u` mapping to the
+    model parameters `z` and observation noise standard deviation `σ` via generator
+    functions `generate_z` and `generate_σ` respectively, a vector `v_0` mapping to
+    the initial diffusion state `x_0` via a generator function `generate_x_0` and a
+    vector `v_seq_flat` which corresponds to a concatenatation of the standard normal
+    vectors used to simulate the Wiener noise increments on each integrator step.
+    """
+
+    num_obs, dim_y = y_seq.shape
+    δ = obs_interval / num_steps_per_obs
+    if isinstance(generate_σ, Number):
+        σ = generate_σ
+
+        def generate_σ(u):
+            return σ
+
+    @api.jit
+    def _neg_log_dens(q):
+        num_step = num_steps_per_obs * num_obs
+        u, v_0, v_seq_flat = split(q, (dim_u, dim_v_0, dim_v * num_step))
+        z = generate_z(u)
+        σ = generate_σ(u)
+        x_0 = generate_x_0(z, v_0)
+        v_seq = v_seq_flat.reshape((num_step, dim_v))
+
+        def step_func(x, v):
+            x_n = forward_func(z, x, v, δ)
+            return x_n, x_n
+
+        _, x_seq = lax.scan(step_func, x_0, v_seq)
+        y_seq_mean = obs_func(x_seq[num_steps_per_obs - 1 :: num_steps_per_obs])
+        return (
+            0.5 * np.sum(((y_seq - y_seq_mean) / σ) ** 2)
+            + num_obs * dim_y * np.log(σ)
+            + (0 if use_gaussian_splitting else 0.5 * np.sum(q ** 2))
+        )
+
+    def neg_log_dens(q):
+        val = float(_neg_log_dens(q))
+        if not onp.isfinite(val):
+            raise HamiltonianDivergenceError()
+        else:
+            return val
+
+    _grad_neg_log_dens = api.jit(api.value_and_grad(_neg_log_dens))
+
+    def grad_neg_log_dens(q):
+        val, grad = _grad_neg_log_dens(q)
+        if not onp.isfinite(val):
+            raise HamiltonianDivergenceError()
+        else:
+            return onp.asarray(grad), float(val)
+
+    return neg_log_dens, grad_neg_log_dens
 
 
 class ConditionedDiffusionConstrainedSystem(System):
@@ -1303,6 +1385,9 @@ def jitted_solve_projection_onto_manifold_quasi_newton(
         )
 
 
+divergence_states = []
+
+
 def jitted_solve_projection_onto_manifold_newton(
     state,
     state_prev,
@@ -1361,6 +1446,7 @@ def jitted_solve_projection_onto_manifold_newton(
             state.mom -= dh2_flow_mom_dmom @ onp.asarray(mu)
         return state
     elif error > divergence_tol or np.isnan(error):
+        divergence_states.append(state.pos.copy())
         raise ConvergenceError(
             f"Newton iteration diverged on iteration {i}. "
             f"Last |c|={error:.1e}, |δq|={norm_delta_q}."
