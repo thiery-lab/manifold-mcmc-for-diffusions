@@ -221,6 +221,12 @@ class ConditionedDiffusionConstrainedSystem(System):
                 )
         y_subseqs = [split_and_reshape(y_seq, shapes) for shapes in y_subseq_shapes]
         noisy_observations = generate_σ is not None
+        if generate_σ is not None and isinstance(generate_σ, Number):
+            σ = generate_σ
+
+            def generate_σ(u):
+                return σ
+
         dim_v_0 = dim_x if dim_v_0 is None else dim_v_0
         self.dim_u = dim_u
         self.dim_v = dim_v
@@ -269,9 +275,9 @@ class ConditionedDiffusionConstrainedSystem(System):
             """Generate partial observation subsequence."""
             x_0 = generate_x_0(z, w_0) if initial_subseq else w_0
             _, x_seq = lax.scan(lambda x, v: step_func(z, x, v), x_0, v_seq)
-            y_seq_mean = obs_func(x_seq[obs_indices])
+            y_seq = obs_func(x_seq[obs_indices])
             if noisy_observations:
-                y_seq = y_seq_mean + σ_n_seq
+                y_seq = y_seq + σ_n_seq
             if final_subseq:
                 return y_seq.flatten()
             elif noisy_observations:
@@ -293,7 +299,7 @@ class ConditionedDiffusionConstrainedSystem(System):
             if noisy_observations:
                 n_subseqs = split_and_reshape(n_seq, y_subseq_shapes[partition])
             else:
-                n_subseqs = (None,) * len(partition_size)
+                n_subseqs = (None,) * partition_size
             x_obs_subseqs = split_and_reshape(x_obs_seq, y_subseq_shapes[partition])
             w_inits = [v_0]
             prev_batched = False
@@ -369,7 +375,7 @@ class ConditionedDiffusionConstrainedSystem(System):
                 σ = generate_σ(u)
                 σ_n_subseqs = [σ * n_subseq for n_subseq in n_subseqs]
             else:
-                σ_n_subseqs = (None,) * len(partition_size)
+                σ_n_subseqs = (None,) * partition_size
             return np.concatenate(
                 [
                     (
@@ -1435,7 +1441,7 @@ def find_initial_state_by_gradient_descent(
     generate_x_obs_seq_init,
     tol=1e-9,
     adam_step_size=2e-1,
-    reg_coeff=5e-2,
+    reg_coeff=2e-2,
     coarse_tol=1e-1,
     max_iters=1000,
     max_num_tries=10,
@@ -1488,7 +1494,7 @@ def find_initial_state_by_gradient_descent(
                 try:
                     state = projection_solver(state, state, 1.0, system, tol)
                 except ConvergenceError:
-                    logger.info("Quasi-Newton iteration diverged.")
+                    logger.info("Newton iteration diverged.")
                 if np.max(np.abs(system.constr(state))) < tol:
                     logging.info("Found constraint satisfying state.")
                     state.mom = system.sample_momentum(state, rng)
