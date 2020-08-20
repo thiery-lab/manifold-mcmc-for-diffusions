@@ -1435,11 +1435,16 @@ def jitted_solve_projection_onto_manifold_newton(
         max_iters,
     )
     if state._call_counts is not None:
-        key = _cache_key_func(system, system.constr)
-        if key in state._call_counts:
-            state._call_counts[key] += i
-        else:
-            state._call_counts[key] = i
+        for method in [
+            system.constr,
+            system.jacob_constr_blocks,
+            'lu_jacob_product_blocks',
+        ]:
+            key = _cache_key_func(system, method)
+            if key in state._call_counts:
+                state._call_counts[key] += i
+            else:
+                state._call_counts[key] = i
     if error < convergence_tol and norm_delta_q < position_tol:
         state.pos = onp.array(q_)
         if state.mom is not None:
