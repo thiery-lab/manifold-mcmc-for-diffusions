@@ -1584,8 +1584,9 @@ def find_initial_state_by_gradient_descent(
                 )
                 try:
                     state = projection_solver(state, state, 1.0, system, tol)
-                except ConvergenceError:
-                    logger.info("Newton iteration diverged.")
+                except ConvergenceError as e:
+                    logger.info(e)
+                    break
                 if np.max(np.abs(system.constr(state))) < tol:
                     logging.info("Found constraint satisfying state.")
                     state.mom = system.sample_momentum(state, rng)
