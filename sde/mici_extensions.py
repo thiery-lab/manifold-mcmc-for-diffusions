@@ -1385,9 +1385,6 @@ def jitted_solve_projection_onto_manifold_quasi_newton(
         )
 
 
-divergence_states = []
-
-
 def jitted_solve_projection_onto_manifold_newton(
     state,
     state_prev,
@@ -1451,7 +1448,6 @@ def jitted_solve_projection_onto_manifold_newton(
             state.mom -= dh2_flow_mom_dmom @ onp.asarray(mu)
         return state
     elif error > divergence_tol or np.isnan(error):
-        divergence_states.append(state.pos.copy())
         raise ConvergenceError(
             f"Newton iteration diverged on iteration {i}. "
             f"Last |c|={error:.1e}, |δq|={norm_delta_q}."
