@@ -11,8 +11,13 @@ from mici.systems import (
     cache_in_state,
     cache_in_state_with_aux,
 )
-from mici.matrices import PositiveDefiniteBlockDiagonalMatrix, IdentityMatrix
+from mici.matrices import (
+    DensePositiveDefiniteMatrix,
+    PositiveDefiniteBlockDiagonalMatrix,
+    IdentityMatrix,
+)
 from mici.transitions import Transition
+from mici.adapters import Adapter, AdaptationError
 from mici.states import ChainState, _cache_key_func
 from mici.solvers import maximum_norm
 from mici.errors import ConvergenceError, HamiltonianDivergenceError
@@ -1698,3 +1703,133 @@ def find_initial_state_by_gradient_descent_noisy_system(
                     )
                     prev_mean_residual_sq = mean_residuals_sq
     raise RuntimeError(f"Did not find valid state in {max_num_tries} tries.")
+
+
+class OnlineBlockDiagonalMetricAdapter(Adapter):
+    """Block diagonal metric adapter using online covariance estimates.
+
+    Uses Welford's algorithm [1] to stably compute an online estimate of the sample
+    covariance matrix of the global parameter chain state position components (which are
+    assume to form the first 'dim_param' components of the state position vector) during
+    sampling. If online estimates are available from multiple independent chains, the
+    final covariance matrix estimate is calculated from the per-chain statistics using a
+    covariance variant due to Schubert and Gertz [2] of the parallel / batched
+    incremental variance algorithm described by Chan et al. [3]. The covariance matrix
+    estimates are optionally regularized towards a scaled identity matrix, with
+    increasing weight for small number of samples, to decrease the effect of noisy
+    estimates for small sample sizes, following the approach in Stan [4]. The metric
+    matrix representation is set to a block diagonal matrix with uppper left block a
+    dense positive definite matrix corresponding to the inverse of the (regularized)
+    covariance matrix estimate and lower right block an identity matrix (representing a
+    fixed metric for the remaining state components which are assumed to have standard
+    normal priors and correspond to local latent variables which are less strongly
+    informed by the observations and so remain close to their prior distribution under
+    the posterior).
+
+
+    References:
+
+      1. Welford, B. P., 1962. Note on a method for calculating corrected sums
+         of squares and products. Technometrics, 4(3), pp. 419–420.
+      2. Schubert, E. and Gertz, M., 2018. Numerically stable parallel
+         computation of (co-)variance. ACM. p. 10. doi:10.1145/3221269.3223036.
+      3. Chan, T. F., Golub, G. H., LeVeque, R. J., 1979. Updating formulae and
+         a pairwise algorithm for computing sample variances. Technical Report
+         STAN-CS-79-773, Department of Computer Science, Stanford University.
+      4. Carpenter, B., Gelman, A., Hoffman, M.D., Lee, D., Goodrich, B.,
+         Betancourt, M., Brubaker, M., Guo, J., Li, P. and Riddell, A., 2017.
+         Stan: A probabilistic programming language. Journal of Statistical
+         Software, 76(1).
+    """
+
+    is_fast = False
+
+    def __init__(self, dim_param, reg_iter_offset=5, reg_scale=1e-3):
+        """
+        Args:
+            reg_iter_offset (int): Iteration offset used for calculating
+                iteration dependent weighting between regularisation target and
+                current covariance estimate. Higher values cause stronger
+                regularisation during initial iterations.
+            reg_scale (float): Positive scalar defining value variance estimates
+                are regularized towards.
+        """
+        self.dim_param = dim_param
+        self.reg_iter_offset = reg_iter_offset
+        self.reg_scale = reg_scale
+
+    def initialize(self, chain_state, transition):
+        dtype = chain_state.pos.dtype
+        return {
+            "iter": 0,
+            "mean": np.zeros(shape=(self.dim_param,), dtype=dtype),
+            "sum_diff_outer": np.zeros(
+                shape=(self.dim_param, self.dim_param), dtype=dtype
+            ),
+            "dim_pos": chain_state.pos.shape[0],
+        }
+
+    def update(self, adapt_state, chain_state, trans_stats, transition):
+        # Use Welford (1962) incremental algorithm to update statistics to
+        # calculate online covariance estimate
+        # https://en.wikipedia.org/wiki/
+        #  Algorithms_for_calculating_variance#Online
+        adapt_state["iter"] += 1
+        pos_minus_mean = chain_state.pos[: self.dim_param] - adapt_state["mean"]
+        adapt_state["mean"] += pos_minus_mean / adapt_state["iter"]
+        adapt_state["sum_diff_outer"] += (
+            pos_minus_mean[None, :]
+            * (chain_state.pos[: self.dim_param] - adapt_state["mean"])[:, None]
+        )
+
+    def _regularize_covar_est(self, covar_est, n_iter):
+        """Update covariance estimate by regularising towards identity.
+
+        Performed in place to prevent further array allocations.
+        """
+        covar_est *= n_iter / (self.reg_iter_offset + n_iter)
+        covar_est_diagonal = np.einsum("ii->i", covar_est)
+        covar_est_diagonal += self.reg_scale * (
+            self.reg_iter_offset / (self.reg_iter_offset + n_iter)
+        )
+
+    def finalize(self, adapt_state, transition):
+        if isinstance(adapt_state, dict):
+            n_iter = adapt_state["iter"]
+            covar_est = adapt_state.pop("sum_diff_outer")
+            dim_pos = adapt_state["dim_pos"]
+        else:
+            # Use Schubert and Gertz (2018) parallel covariance estimation
+            # algorithm to combine per-chain statistics
+            for i, a in enumerate(adapt_state):
+                if i == 0:
+                    n_iter = a["iter"]
+                    mean_est = a.pop("mean")
+                    covar_est = a.pop("sum_diff_outer")
+                    dim_pos = a["dim_pos"]
+                else:
+                    n_iter_prev = n_iter
+                    n_iter += a["iter"]
+                    mean_diff = mean_est - a["mean"]
+                    mean_est *= n_iter_prev
+                    mean_est += a["iter"] * a["mean"]
+                    mean_est /= n_iter
+                    covar_est += a["sum_diff_outer"]
+                    covar_est += (
+                        np.outer(mean_diff, mean_diff)
+                        * (a["iter"] * n_iter_prev)
+                        / n_iter
+                    )
+        if n_iter < 2:
+            raise AdaptationError(
+                "At least two chain samples required to compute a variance "
+                "estimates."
+            )
+        covar_est /= n_iter - 1
+        self._regularize_covar_est(covar_est, n_iter)
+        transition.system.metric = PositiveDefiniteBlockDiagonalMatrix(
+            (
+                DensePositiveDefiniteMatrix(covar_est).inv,
+                IdentityMatrix(dim_pos - self.dim_param),
+            )
+        )
