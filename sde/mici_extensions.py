@@ -505,7 +505,7 @@ class ConditionedDiffusionConstrainedSystem(System):
         def init_objective_noisy_observations(u_v):
             """Optimisation objective to find initial state for noisy systems."""
             u, v_0, v_flat = split(u_v, (dim_u, dim_v_0, num_step * dim_v))
-            v_seq = v_flat.reshape((num_obs * num_steps_per_obs, dim_v))
+            v_seq = v_flat.reshape((num_step, dim_v))
             z = generate_z(u)
             x_0 = generate_x_0(z, v_0)
             σ = generate_σ(u)
@@ -1636,6 +1636,7 @@ def find_initial_state_by_gradient_descent_noisy_system(
                 f"Did not find valid initial state in {init_tries} tries."
             )
         opt_state = opt_init((u_v,))
+        prev_mean_residual_sq = np.mean(residuals ** 2)
         for i in range(max_iters):
             opt_state_next, residuals = step(i, opt_state)
             mean_residuals_sq = np.mean(residuals ** 2)
@@ -1655,7 +1656,12 @@ def find_initial_state_by_gradient_descent_noisy_system(
                 return state
             opt_state = opt_state_next
             if i % 100 == 0:
-                logging.info(
-                    f"Iteration {i: >6}: mean|residual^2| = {mean_residuals_sq:.3e}"
-                )
+                if i > 0 and i < max_iters // 2 and (mean_residuals_sq / prev_mean_residual_sq) > 0.8:
+                    logging.info("Slow progress, restarting")
+                    break
+                else:
+                    logging.info(
+                        f"Iteration {i: >6}: mean|residual^2| = {mean_residuals_sq:.3e}"
+                    )
+                    prev_mean_residual_sq = mean_residuals_sq
     raise RuntimeError(f"Did not find valid state in {max_num_tries} tries.")
