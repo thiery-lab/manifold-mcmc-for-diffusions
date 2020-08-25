@@ -45,25 +45,10 @@ parser.add_argument(
     help="Number of time steps per interobservation interval to use in inference",
 )
 parser.add_argument(
-    "--num-obs-per-subseq",
-    type=int,
-    default=14,
-    help="Average number of observations per blocked subsequence",
-)
-parser.add_argument(
     "--splitting",
     choices=("standard", "gaussian"),
     default="standard",
-    help=(
-        "Hamiltonian splitting to use to define unconstrained integrator step"
-        " used as basis for constrained integrator step"
-    ),
-)
-parser.add_argument(
-    "--num-inner-h2-step",
-    type=int,
-    default=1,
-    help="Number of inner h2 flow steps in each constrained integrator step",
+    help=("Hamiltonian splitting to use to define integrator step"),
 )
 parser.add_argument(
     "--num-chain", type=int, default=4, help="Number of independent chains to sample"
@@ -87,37 +72,26 @@ parser.add_argument(
     help="Target acceptance statistic for step size adaptation",
 )
 parser.add_argument(
+    "--metric-type",
+    type=str,
+    choices=("identity", "diagonal", "block", "dense"),
+    default="identity",
+    help=(
+        "Type of metric (mass matrix) to use. If 'identity' (default) no adaptation "
+        "is performed and the metric matrix representation is fixed to the identity. If"
+        " 'diagonal' a diagonal metric matrix representation is adapted based on "
+        "estimates of the variances of each state component. If 'block' a block "
+        "diagonal metric matrix representation is used, with a dense upper-left block "
+        "corresponding to the state components mapping to global parameters ('u' part "
+        "state vector) and a diagonal lower-right block, with the diagonal block fixed "
+        " to the identity with only the dense block adapted based on an estimate of the"
+        "(marginal) posterior covariance matrix of the 'u' state vector component. If "
+        "'dense' a dense metric matrix representation is used based on an estimate of "
+        "the covariance matrix of the full state vector."
+    ),
+)
+parser.add_argument(
     "--seed", type=int, default=20200710, help="Seed for random number generator"
-)
-parser.add_argument(
-    "--projection-solver",
-    choices=("newton", "quasi-newton"),
-    default="newton",
-    help="Non-linear iterative solver to use to solve projection onto manifold",
-)
-parser.add_argument(
-    "--projection-solver-max-iters",
-    type=int,
-    default=50,
-    help="Maximum number of iterations to try in projection solver",
-)
-parser.add_argument(
-    "--projection-solver-convergence-tol",
-    type=float,
-    default=1e-9,
-    help="Tolerance for norm of constraint function in projection solver",
-)
-parser.add_argument(
-    "--projection-solver-position-tol",
-    type=float,
-    default=1e-7,
-    help="Tolerance for norm of change in position in projection solver",
-)
-parser.add_argument(
-    "--reverse-check-tol",
-    type=float,
-    default=2e-7,
-    help="Tolerance for reversibility check on constrained integrator steps",
 )
 args = parser.parse_args()
 
@@ -127,8 +101,8 @@ variable_σ = args.observation_noise_std < 0
 timestamp = datetime.datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
 dir_name = (
     "σ_variable_" if variable_σ else f"σ_{args.observation_noise_std:.2g}_"
-) + f"H_{args.num_inner_h2_step}_{args.splitting}_splitting_{timestamp}"
-output_dir = os.path.join(args.output_root_dir, "sir_chmc", dir_name)
+) + f"{args.splitting}_splitting_{args.metric_type}_metric_{timestamp}"
+output_dir = os.path.join(args.output_root_dir, "sir_hmc", dir_name)
 
 if not os.path.exists(output_dir):
     os.makedirs(output_dir)
@@ -153,7 +127,7 @@ dim_u = (dim_z + 1) if variable_σ else dim_z
 dim_v_0 = 1
 dim_v = dim_w
 
-N = 763  # total population size S + I + R
+N = 763
 
 
 def drift_func(x, z):
@@ -244,59 +218,51 @@ obs_interval = 1.0
 
 # Set up Mici objects
 
-system = sde.mici_extensions.ConditionedDiffusionConstrainedSystem(
+(
+    neg_log_dens,
+    grad_neg_log_dens,
+) = sde.mici_extensions.conditioned_diffusion_neg_log_dens_and_grad(
     obs_interval,
     args.num_steps_per_obs,
-    args.num_obs_per_subseq,
     y_seq_ref,
     dim_u,
-    dim_x,
+    dim_v_0,
     dim_v,
     forward_func,
     generate_x_0,
     generate_z,
-    obs_func,
     generate_σ if variable_σ else args.observation_noise_std,
-    use_gaussian_splitting=args.splitting == "gaussian",
-    dim_v_0=dim_v_0,
+    obs_func,
+    args.splitting == "gaussian",
 )
 
-projection_solver = (
-    sde.mici_extensions.jitted_solve_projection_onto_manifold_newton
-    if args.projection_solver == "newton"
-    else sde.mici_extensions.jitted_solve_projection_onto_manifold_quasi_newton
-)
+if args.splitting == "gaussian":
+    system = mici.systems.GaussianEuclideanMetricSystem(
+        neg_log_dens=neg_log_dens, grad_neg_log_dens=grad_neg_log_dens
+    )
+else:
+    system = mici.systems.EuclideanMetricSystem(
+        neg_log_dens=neg_log_dens, grad_neg_log_dens=grad_neg_log_dens
+    )
 
-project_solver_kwargs = {
-    "convergence_tol": args.projection_solver_convergence_tol,
-    "position_tol": args.projection_solver_position_tol,
-    "max_iters": args.projection_solver_max_iters,
-}
-
-integrator = mici.integrators.ConstrainedLeapfrogIntegrator(
-    system,
-    n_inner_step=args.num_inner_h2_step,
-    projection_solver=projection_solver,
-    reverse_check_tol=args.reverse_check_tol,
-    projection_solver_kwargs=project_solver_kwargs,
-)
+integrator = mici.integrators.LeapfrogIntegrator(system)
 
 rng = onp.random.default_rng(args.seed)
 
-sampler = mici.samplers.MarkovChainMonteCarloMethod(
-    rng,
-    transitions={
-        "momentum": mici.transitions.IndependentMomentumTransition(system),
-        "integration": mici.transitions.MultinomialDynamicIntegrationTransition(
-            system, integrator
-        ),
-        "switch_partition": sde.mici_extensions.SwitchPartitionTransition(system),
-    },
-)
+sampler = mici.samplers.DynamicMultinomialHMC(system, integrator, rng)
 
-step_size_adapter = mici.adapters.DualAveragingStepSizeAdapter(
-    args.step_size_adaptation_target,
-)
+adapters = [
+    mici.adapters.DualAveragingStepSizeAdapter(args.step_size_adaptation_target,)
+]
+
+if args.metric_type == "diagonal":
+    adapters.append(mici.adapters.OnlineVarianceMetricAdapter())
+elif args.metric_type == "dense":
+    adapters.append(mici.adapters.OnlineCovarianceMetricAdapter())
+elif args.metric_type == "block":
+    adapters.append(
+        sde.mici_extensions.OnlineBlockDiagonalMetricAdapter(dim_u + dim_v_0)
+    )
 
 
 def trace_func(state):
@@ -327,9 +293,24 @@ def trace_func(state):
 init_states = []
 for c in range(args.num_chain):
     state = sde.mici_extensions.find_initial_state_by_gradient_descent_noisy_system(
-        system, rng, max_num_tries=100, adam_step_size=1e-1, max_iters=5000
+        system,
+        rng,
+        max_num_tries=100,
+        adam_step_size=1e-1,
+        max_iters=5000,
+        dim_u=dim_u,
+        dim_v_0=dim_v_0,
+        dim_v=dim_v,
+        num_obs=num_obs,
+        num_steps_per_obs=args.num_steps_per_obs,
+        generate_z=generate_z,
+        generate_x_0=generate_x_0,
+        generate_σ=generate_σ if variable_σ else lambda u: args.observation_noise_std,
+        forward_func=forward_func,
+        obs_func=obs_func,
+        y_seq=y_seq_ref,
+        δ=obs_interval / args.num_steps_per_obs,
     )
-    assert onp.allclose(system.constr(state), 0)
     init_states.append(state)
 
 
@@ -347,15 +328,10 @@ final_states, traces, stats = sampler.sample_chains_with_adaptive_warm_up(
     args.num_main_iter,
     init_states,
     trace_funcs=[trace_func],
-    adapters={"integration": [step_size_adapter]},
+    adapters=adapters,
     memmap_enabled=True,
     memmap_path=output_dir,
-    monitor_stats=[
-        ("integration", "accept_stat"),
-        ("integration", "convergence_error"),
-        ("integration", "non_reversible_step"),
-        ("integration", "n_step"),
-    ],
+    monitor_stats=["accept_stat", "diverging", "n_step"],
 )
 
 sampling_time = time.time() - start_time
