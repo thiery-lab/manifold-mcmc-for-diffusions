@@ -13,7 +13,6 @@ import jax.config
 import jax.numpy as jnp
 import jax.lax as lax
 import jax.api as api
-from jax.scipy.special import ndtr
 import arviz
 
 # Ensure Jax configured to use double-precision and to run on CPU

@@ -13,7 +13,6 @@ import jax.config
 import jax.numpy as jnp
 import jax.lax as lax
 import jax.api as api
-from jax.scipy.special import ndtr
 import arviz
 
 # Ensure Jax configured to use double-precision and to run on CPU
@@ -88,6 +87,15 @@ parser.add_argument(
         "(marginal) posterior covariance matrix of the 'u' state vector component. If "
         "'dense' a dense metric matrix representation is used based on an estimate of "
         "the covariance matrix of the full state vector."
+    ),
+)
+parser.add_argument(
+    "--max-tree-depth",
+    type=int,
+    default=20,
+    help=(
+        "Maximum depth of trajectory binary tree used by dynamic HMC transition. "
+        "Maximum number of integrator steps per  iteration will be `2**max_tree_depth`."
     ),
 )
 parser.add_argument(
@@ -249,7 +257,9 @@ integrator = mici.integrators.LeapfrogIntegrator(system)
 
 rng = onp.random.default_rng(args.seed)
 
-sampler = mici.samplers.DynamicMultinomialHMC(system, integrator, rng)
+sampler = mici.samplers.DynamicMultinomialHMC(
+    system, integrator, rng, max_tree_depth=args.max_tree_depth
+)
 
 adapters = [
     mici.adapters.DualAveragingStepSizeAdapter(args.step_size_adaptation_target,)
