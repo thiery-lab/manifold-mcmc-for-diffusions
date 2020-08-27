@@ -294,7 +294,7 @@ sampler = mici.samplers.MarkovChainMonteCarloMethod(
 )
 
 step_size_adapter = mici.adapters.DualAveragingStepSizeAdapter(
-    args.step_size_adaptation_target,
+    args.step_size_adaptation_target, log_step_size_reg_coefficient=0.1,
 )
 
 
