@@ -22,7 +22,7 @@ jax.config.update("jax_platform_name", "cpu")
 
 # Process command line arguments defining experiment parameters
 
-parser = argparse.ArgumentParser(description="Run SIR diffusion model experiment")
+parser = argparse.ArgumentParser(description="Run SIR model experiment (HMC)")
 parser.add_argument(
     "--output-root-dir",
     default="experiments",
@@ -47,7 +47,7 @@ parser.add_argument(
     "--splitting",
     choices=("standard", "gaussian"),
     default="standard",
-    help=("Hamiltonian splitting to use to define integrator step"),
+    help="Hamiltonian splitting to use to define integrator step",
 )
 parser.add_argument(
     "--num-chain", type=int, default=4, help="Number of independent chains to sample"
@@ -69,6 +69,12 @@ parser.add_argument(
     type=float,
     default=0.8,
     help="Target acceptance statistic for step size adaptation",
+)
+parser.add_argument(
+    "--step-size-reg-coefficient",
+    type=float,
+    default=0.1,
+    help="Regularisation coefficient for step size adaptation",
 )
 parser.add_argument(
     "--metric-type",
@@ -262,7 +268,10 @@ sampler = mici.samplers.DynamicMultinomialHMC(
 )
 
 adapters = [
-    mici.adapters.DualAveragingStepSizeAdapter(args.step_size_adaptation_target,)
+    mici.adapters.DualAveragingStepSizeAdapter(
+        adapt_stat_target=args.step_size_adaptation_target,
+        log_step_size_reg_coefficient=args.step_size_reg_coefficient,
+    )
 ]
 
 if args.metric_type == "diagonal":

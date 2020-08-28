@@ -22,7 +22,7 @@ jax.config.update("jax_platform_name", "cpu")
 
 # Process command line arguments defining experiment parameters
 
-parser = argparse.ArgumentParser(description="Run SIR diffusion model experiment")
+parser = argparse.ArgumentParser(description="Run SIR model experiment (CHMC)")
 parser.add_argument(
     "--output-root-dir",
     default="experiments",
@@ -86,6 +86,12 @@ parser.add_argument(
     help="Target acceptance statistic for step size adaptation",
 )
 parser.add_argument(
+    "--step-size-reg-coefficient",
+    type=float,
+    default=0.1,
+    help="Regularisation coefficient for step size adaptation"
+)
+parser.add_argument(
     "--seed", type=int, default=20200710, help="Seed for random number generator"
 )
 parser.add_argument(
@@ -138,8 +144,7 @@ with open(os.path.join(output_dir, "args.json"), "w") as f:
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
 logger.handlers = []
-fh = logging.FileHandler(os.path.join(output_dir, "info.log"))
-logger.addHandler(fh)
+logger.addHandler(logging.FileHandler(os.path.join(output_dir, "info.log")))
 
 
 # Define model specific constants and functions
@@ -294,7 +299,8 @@ sampler = mici.samplers.MarkovChainMonteCarloMethod(
 )
 
 step_size_adapter = mici.adapters.DualAveragingStepSizeAdapter(
-    args.step_size_adaptation_target, log_step_size_reg_coefficient=0.1,
+    adapt_stat_target=args.step_size_adaptation_target,
+    log_step_size_reg_coefficient=args.step_size_reg_coefficient,
 )
 
 
