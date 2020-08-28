@@ -90,6 +90,7 @@ def conditioned_diffusion_neg_log_dens_and_grad(
     generate_σ,
     obs_func,
     use_gaussian_splitting=False,
+    return_jax_funcs=False,
 ):
     """Construct negative log target density + gradient functions for diffusion model.
 
@@ -146,6 +147,9 @@ def conditioned_diffusion_neg_log_dens_and_grad(
             Or the more standard splitting
                 h₁(q) = ½‖(y - g_y(q)) / σ‖² + D_y * log(σ) + ½qᵀq, h₂(q, p) = ½pᵀM⁻¹p
             to define the leapfrog integrator for the Hamiltonian dynamics.
+        return_jax_funcs (bool): Whether to return original JAX function (True) suitable
+            for further JAX transformation or wrapped versions which output NumPy arrays
+            rather JAX `DeviceArray` instances.
     """
 
     num_obs, dim_y = y_seq.shape
@@ -177,19 +181,22 @@ def conditioned_diffusion_neg_log_dens_and_grad(
             + (0 if use_gaussian_splitting else 0.5 * np.sum(q ** 2))
         )
 
+    _grad_neg_log_dens = api.jit(api.value_and_grad(_neg_log_dens))
+
+    if return_jax_funcs:
+        return _neg_log_dens, lambda q: _grad_neg_log_dens(q)[::-1]
+
     def neg_log_dens(q):
         val = float(_neg_log_dens(q))
         if not onp.isfinite(val):
-            raise HamiltonianDivergenceError()
+            raise HamiltonianDivergenceError("Hamiltonian non-finite")
         else:
             return val
-
-    _grad_neg_log_dens = api.jit(api.value_and_grad(_neg_log_dens))
 
     def grad_neg_log_dens(q):
         val, grad = _grad_neg_log_dens(q)
         if not onp.isfinite(val):
-            raise HamiltonianDivergenceError()
+            raise HamiltonianDivergenceError("Hamiltonian non-finite")
         else:
             return onp.asarray(grad), float(val)
 
