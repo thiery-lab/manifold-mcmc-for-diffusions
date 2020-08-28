@@ -115,13 +115,13 @@ parser.add_argument(
 parser.add_argument(
     "--projection-solver-position-tol",
     type=float,
-    default=1e-7,
+    default=1e-8,
     help="Tolerance for norm of change in position in projection solver",
 )
 parser.add_argument(
     "--reverse-check-tol",
     type=float,
-    default=2e-7,
+    default=2e-8,
     help="Tolerance for reversibility check on constrained integrator steps",
 )
 args = parser.parse_args()
