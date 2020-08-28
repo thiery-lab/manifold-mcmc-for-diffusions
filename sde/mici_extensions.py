@@ -108,6 +108,44 @@ def conditioned_diffusion_neg_log_dens_and_grad(
     the initial diffusion state `x_0` via a generator function `generate_x_0` and a
     vector `v_seq_flat` which corresponds to a concatenatation of the standard normal
     vectors used to simulate the Wiener noise increments on each integrator step.
+
+    Args:
+        obs_interval (float): Interobservation time interval.
+        num_steps_per_obs (int): Number of discrete time steps to simulate between each
+            observation time.
+        y_seq (array): Two-dimensional array containing observations at equally spaced
+            time intervals, with first axis of array corresponding to observation time
+            index (in order of increasing time) and second axis corresponding to
+            dimension of each (vector-valued) observation.
+        dim_u (int): Dimension of vector `u` mapping to parameter vector `z`.
+        dim_v_0 (int): Dimension of vector used to generate initial state `x_0`.
+        dim_v (int): Dimension of noise vector `v` consumed by `forward_func` to
+            approximate time step.
+        forward_func (Callable[[array, array, array, float], array]): Function
+            implementing forward step of time-discretisation of diffusion such that
+            `forward_func(z, x, v, δ)` for parameter vector `z`, current state `x` at
+            time `t`, standard normal vector `v` and  small timestep `δ` and is
+            distributed approximately according to `X(t + δ) | X(t) = x, Z = z`.
+        generate_x_0 (Callable[[array, array], array]): Generator function for the
+            initial state such that `generator_x_0(z, v_0)` for parameter vector `z` and
+            standard normal vector `v_0` is distributed according to prior distribution
+            on `X(0) | Z = z`.
+        generate_z (Callable[[array], array]): Generator function for parameter vector
+            such that `generator_z(u)` for standard normal vector `u` is distributed
+            according to prior distribution on parameter vector `Z`.
+        generate_σ (Callable[[array], array] or array): Function to generate
+            standard-deviation(s) of independent and zero-mean Gaussian noise added to
+            observations or a arrat specifying the observation noise standard
+            deviation(s) directly if fixed. Function should accept a single array
+            argument corresponding to the vector `u` mapping to the parameters which
+            allows for variable observation noise standard-deviations.
+        obs_func (Callable[[array], array]): Function mapping from state vector `x` at
+            an observation time to the corresponding observed vector `y = obs_func(x)`.
+        use_gaussian_splitting (bool): Whether to use Gaussian specific splitting
+                h₁(q) = ½‖(y - g_y(q)) / σ‖² + D_y * log(σ), h₂(q, p) = ½qᵀq + ½pᵀM⁻¹p
+            Or the more standard splitting
+                h₁(q) = ½‖(y - g_y(q)) / σ‖² + D_y * log(σ) + ½qᵀq, h₂(q, p) = ½pᵀM⁻¹p
+            to define the leapfrog integrator for the Hamiltonian dynamics.
     """
 
     num_obs, dim_y = y_seq.shape
@@ -214,13 +252,13 @@ class ConditionedDiffusionConstrainedSystem(System):
             obs_func (Callable[[array], array]): Function mapping from state
                 vector `x` at an observation time to the corresponding observed
                 vector `y = obs_func(x)`.
-            generate_σ (None or Callable[[array], array]): Function to generate
+            generate_σ (None or Callable[[array], array] or array): Function to generate
                 standard-deviation(s) of independent and zero-mean Gaussian noise added
                 to observations. Function should accept a single array argument
                 corresponding to the vector `u` mapping to the parameters which allows
-                for variable observation noise standard-deviations (or alternatively
-                this argument may be ignore and a constant array returned if the
-                standard-deviations are fixed). If equal to `None` (the default)
+                for variable observation noise standard-deviations. Alternatively if
+                the standard-deviations are known and fixed a constant array may be
+                specified instead of a function. If equal to `None` (the default)
                 noiseless observations will be assumed (with the resulting latent state
                 not including a component for the observation noise).
             use_gaussian_splitting (bool): Whether to use Gaussian specific splitting
@@ -228,11 +266,7 @@ class ConditionedDiffusionConstrainedSystem(System):
                 Or the more standard splitting
                     h₁(q) = ½qᵀq  + ½log(∂c(q)ᵀM⁻¹∂c(q)), h₂(q, p) =  ½pᵀM⁻¹p
                 In the former case the metric matrix representation is required to be
-                the identity matrix. As the unconstrained integrator steps exactly
-                the Gaussian prior (i.e. without the Gram log determinant term) in the
-                Gaussian splitting case, using it can give improved performance in
-                high dimensional systems where the step size is limited by the
-                Hamiltonian error.
+                the identity matrix.
             metric (Matrix): Metric matrix representation. Should be either an
                 `mici.matrices.IdentityMatrix` (compulsory if `use_gaussian_splitting`
                 is `True`) or an `mici.matrices.SymmetricBlockDiagonalMatrix` instance,
@@ -315,28 +349,23 @@ class ConditionedDiffusionConstrainedSystem(System):
                 return σ
 
         dim_v_0 = dim_x if dim_v_0 is None else dim_v_0
-        self.dim_u = dim_u
-        self.dim_v = dim_v
-        self.dim_v_0 = dim_v_0
-        self.dim_y = dim_y
-        self.dim_q = (
-            dim_u
-            + dim_v_0
-            + dim_v * num_obs * num_steps_per_obs
-            + (num_obs * dim_y if noisy_observations else 0)
-        )
-        self.num_obs = num_obs
-        self.num_steps_per_obs = num_steps_per_obs
-        self.generate_x_0 = generate_x_0
-        self.generate_z = generate_z
-        self.generate_σ = generate_σ
-        self.forward_func = forward_func
-        self.obs_func = obs_func
-        self.δ = δ
-        self.y_seq = y_seq
-        self.obs_indices = obs_indices
         self.y_subseqs = y_subseqs
         self.num_partition = len(y_subseqs)
+        self.model_dict = {
+            "dim_u": dim_u,
+            "dim_v": dim_v,
+            "dim_v_0": dim_v_0,
+            "dim_y": dim_y,
+            "num_obs": num_obs,
+            "num_steps_per_obs": num_steps_per_obs,
+            "δ": δ,
+            "generate_z": generate_z,
+            "generate_x_0": generate_x_0,
+            "generate_σ": generate_σ,
+            "forward_func": forward_func,
+            "obs_func": obs_func,
+            "y_seq": y_seq,
+        }
 
         @api.jit
         def step_func(z, x, v):
@@ -479,32 +508,6 @@ class ConditionedDiffusionConstrainedSystem(System):
                     for b in range(partition_size)
                 ]
             )
-
-        @api.jit
-        def init_objective(q, x_obs_seq, reg_coeff):
-            """Optimisation objective to find initial state on manifold."""
-            if noisy_observations:
-                u, v_0, v_seq_flat, _ = split(
-                    q, (dim_u, dim_v_0, num_step * dim_v, num_obs * dim_y)
-                )
-            else:
-                u, v_0, v_seq_flat = split(q, (dim_u, dim_v_0,))
-            v_subseqs = v_seq_flat.reshape((num_obs, num_steps_per_obs, dim_v))
-            z = generate_z(u)
-            x_0 = generate_x_0(z, v_0)
-            x_inits = np.concatenate((x_0[None], x_obs_seq[:-1]), 0)
-
-            def generate_final_state(z, v_seq, x_0):
-                _, x_seq = lax.scan(lambda x, v: step_func(z, x, v), x_0, v_seq)
-                return x_seq[-1]
-
-            c = (
-                api.vmap(generate_final_state, in_axes=(None, 0, 0))(
-                    z, v_subseqs, x_inits
-                )
-                - x_obs_seq
-            )
-            return 0.5 * np.mean(c ** 2) + 0.5 * reg_coeff * np.mean(q ** 2), c
 
         @api.partial(api.jit, static_argnums=(2,))
         def jacob_constr_blocks(q, x_obs_seq, partition=0):
@@ -1113,12 +1116,9 @@ class ConditionedDiffusionConstrainedSystem(System):
         self._grad_log_det_sqrt_gram = api.jit(
             api.value_and_grad(log_det_sqrt_gram, has_aux=True), (2,)
         )
-        self.value_and_grad_init_objective = api.jit(
-            api.value_and_grad(init_objective, (0,), has_aux=True)
-        )
         self._normal_space_component = normal_space_component
-        self.quasi_newton_projection = quasi_newton_projection
-        self.newton_projection = newton_projection
+        self._quasi_newton_projection = quasi_newton_projection
+        self._newton_projection = newton_projection
 
     @cache_in_state("pos", "x_obs_seq", "partition")
     def constr(self, state):
@@ -1304,11 +1304,11 @@ def jitted_solve_projection_onto_manifold_quasi_newton(
 ):
     """Symmetric quasi-Newton solver for projecting points onto manifold.
 
-    Solves an equation of the form `r(λ) = c(q_ + M⁻¹ ∂c(q)ᵀλ) = 0` for the
-    vector of Lagrange multipliers `λ` to project a point `q_` on to the
-    manifold defined by the zero level set of `c`, with the projection performed
-    with in the linear subspace defined by the rows of the Jacobian matrix
-    `∂c(q)` evaluated at a previous point on the manifold `q`.
+    Solves an equation of the form `r(λ) = c(q_ + M⁻¹ ∂c(q)ᵀλ) = 0` for the vector of
+    Lagrange multipliers `λ` to project a point `q_` on to the manifold defined by the
+    zero level set of `c`, with the projection performed with in the linear subspace
+    defined by the rows of the Jacobian matrix `∂c(q)` evaluated at a previous point on
+    the manifold `q`.
 
     The Jacobian of the residual function `r` is
 
@@ -1318,8 +1318,8 @@ def jitted_solve_projection_onto_manifold_quasi_newton(
 
         λ = λ - ∂r(λ)⁻¹ r(λ)
 
-    requires evaluating `∂c` on each iteration. The symmetric quasi-Newton
-    iteration instead uses the approximation
+    requires evaluating `∂c` on each iteration. The symmetric quasi-Newton iteration
+    instead uses the approximation
 
         ∂c(q_ + ∂c(q)ᵀλ) M⁻¹ ∂c(q)ᵀ ≈ ∂c(q) M⁻¹ ∂c(q)ᵀ
 
@@ -1327,19 +1327,19 @@ def jitted_solve_projection_onto_manifold_quasi_newton(
 
         λ = λ - (∂c(q) M⁻¹ ∂c(q)ᵀ)⁻¹ r(λ)
 
-    allowing a previously computed Cholesky decomposition of the Gram matrix
-    `∂c(q) M⁻¹ ∂c(q)ᵀ` to be used to solve the linear system in each iteration
-    with no requirement to evaluate `∂c` on each iteration.
+    allowing a previously computed Cholesky decomposition of the Gram matrix `∂c(q) M⁻¹
+    ∂c(q)ᵀ` to be used to solve the linear system in each iteration with no requirement
+    to evaluate `∂c` on each iteration.
 
-    Compared to the inbuilt solver in `mici.solvers` this version exploits the
-    structure in the constraint Jacobian `∂c` for conditioned diffusion systems
-    and JIT compiles the iteration using JAX for better performance.
+    Compared to the inbuilt solver in `mici.solvers` this version exploits the structure
+    in the constraint Jacobian `∂c` for conditioned diffusion systems and JIT compiles
+    the iteration using JAX for better performance.
     """
     jacob_constr_blocks_prev = system.jacob_constr_blocks(state_prev)
     chol_gram_blocks_prev = system.chol_gram_blocks(state_prev)
     q, x_obs_seq, partition = state.pos, state.x_obs_seq, state.partition
     _, dh2_flow_mom_dmom = system.dh2_flow_dmom(dt)
-    q_, mu, i, norm_delta_q, error = system.quasi_newton_projection(
+    q_, mu, i, norm_delta_q, error = system._quasi_newton_projection(
         q,
         x_obs_seq,
         partition,
@@ -1386,11 +1386,11 @@ def jitted_solve_projection_onto_manifold_newton(
 ):
     """Newton solver for projecting points onto manifold.
 
-    Solves an equation of the form `r(λ) = c(q_ + M⁻¹ ∂c(q)ᵀλ) = 0` for the
-    vector of Lagrange multipliers `λ` to project a point `q_` on to the
-    manifold defined by the zero level set of `c`, with the projection performed
-    with in the linear subspace defined by the rows of the Jacobian matrix
-    `∂c(q)` evaluated at a previous point on the manifold `q`.
+    Solves an equation of the form `r(λ) = c(q_ + M⁻¹ ∂c(q)ᵀλ) = 0` for the vector of
+    Lagrange multipliers `λ` to project a point `q_` on to the manifold defined by the
+    zero level set of `c`, with the projection performed with in the linear subspace
+    defined by the rows of the Jacobian matrix `∂c(q)` evaluated at a previous point on
+    the manifold `q`.
 
     The Jacobian of the residual function `r` is
 
@@ -1402,14 +1402,14 @@ def jitted_solve_projection_onto_manifold_newton(
 
     which requires evaluating `∂c` on each iteration.
 
-    Compared to the inbuilt solver in `mici.solvers` this version exploits the
-    structure in the constraint Jacobian `∂c` for conditioned diffusion systems
-    and JIT compiles the iteration using JAX for better performance.
+    Compared to the inbuilt solver in `mici.solvers` this version exploits the structure
+    in the constraint Jacobian `∂c` for conditioned diffusion systems and JIT compiles
+    the iteration using JAX for better performance.
     """
     jacob_constr_blocks_prev = system.jacob_constr_blocks(state_prev)
     q, x_obs_seq, partition = state.pos, state.x_obs_seq, state.partition
     _, dh2_flow_mom_dmom = system.dh2_flow_dmom(dt)
-    q_, mu, i, norm_delta_q, error = system.newton_projection(
+    q_, mu, i, norm_delta_q, error = system._newton_projection(
         q,
         x_obs_seq,
         partition,
@@ -1449,7 +1449,7 @@ def jitted_solve_projection_onto_manifold_newton(
 
 
 def find_initial_state_by_linear_interpolation(
-    system, rng, generate_x_obs_seq_init, u=None, v_0=None,
+    system, rng, generate_x_obs_seq_init, u=None, v_0=None, **model_dict
 ):
     """Find an initial constraint satisying state linearly interpolating noise sequence.
 
@@ -1462,11 +1462,13 @@ def find_initial_state_by_linear_interpolation(
     `v` and that the Jacobian of `forward_func` wrt `v` is full row-rank.
     """
 
+    model_dict = system.model_dict if not model_dict else model_dict
+
     def mean_and_sqrt_covar_step_diff(z, x, δ):
-        v = np.zeros(system.dim_v)
+        v = np.zeros(model_dict["dim_v"])
 
         def step_diff_func(v):
-            return system.forward_func(z, x, v, δ) - x
+            return model_dict["forward_func"](z, x, v, δ) - x
 
         return step_diff_func(v), api.jacobian(step_diff_func)(v)
 
@@ -1475,38 +1477,45 @@ def find_initial_state_by_linear_interpolation(
         num_obs = x_obs_seq.shape[0]
 
         def solve_inner(x, Δx):
-            mean_diff, sqrt_covar_diff = mean_and_sqrt_covar_step_diff(z, x, system.δ)
+            mean_diff, sqrt_covar_diff = mean_and_sqrt_covar_step_diff(
+                z, x, model_dict["δ"]
+            )
             return np.linalg.lstsq(sqrt_covar_diff, (Δx - mean_diff))[0]
 
         def solve_outer(x_0, x_1):
-            Δx = (x_1 - x_0) / system.num_steps_per_obs
-            x_seq = x_0[None] + np.arange(system.num_steps_per_obs)[:, None] * Δx[None]
+            Δx = (x_1 - x_0) / model_dict["num_steps_per_obs"]
+            x_seq = (
+                x_0[None]
+                + np.arange(model_dict["num_steps_per_obs"])[:, None] * Δx[None]
+            )
             return api.vmap(solve_inner, (0, None))(x_seq, Δx)
 
         x_0_seq = np.concatenate((x_0[None], x_obs_seq[:-1]))
         x_1_seq = x_obs_seq
 
         return api.vmap(solve_outer)(x_0_seq, x_1_seq).reshape(
-            (num_obs * system.num_steps_per_obs, system.dim_v)
+            (num_obs * model_dict["num_steps_per_obs"], model_dict["dim_v"])
         )
 
-    u = rng.standard_normal(system.dim_u) if u is None else u
-    z = system.generate_z(u)
-    v_0 = rng.standard_normal(system.dim_v_0) if v_0 is None else v_0
-    x_0 = system.generate_x_0(z, v_0)
+    u = rng.standard_normal(model_dict["dim_u"]) if u is None else u
+    z = model_dict["generate_z"](u)
+    v_0 = rng.standard_normal(model_dict["dim_v_0"]) if v_0 is None else v_0
+    x_0 = model_dict["generate_x_0"](z, v_0)
     x_obs_seq = generate_x_obs_seq_init(rng)
     v_seq = solve_for_v_seq(x_obs_seq, x_0, z)
-    if system.generate_σ is not None:
-        n = onp.zeros(system.dim_y * system.num_obs)
-        q = onp.concatenate([u, v_0, v_seq.flatten(), n])
-        y_gen = system.obs_func(system._generate_x_obs_seq(q))
-        σ = system.generate_σ(u)
-        n = ((system.y_seq - y_gen) / σ).flatten()
+    if (
+        isinstance(system, ConditionedDiffusionConstrainedSystem)
+        and model_dict["generate_σ"] is not None
+    ):
+        n = onp.zeros(model_dict["dim_y"] * model_dict["num_obs"])
         q = onp.concatenate([u, v_0, v_seq.flatten(), n])
     else:
         q = onp.concatenate([u, v_0, v_seq.flatten()])
-    state = ConditionedDiffusionHamiltonianState(pos=q, x_obs_seq=x_obs_seq)
-    assert onp.allclose(system.constr(state), 0)
+    if isinstance(system, ConditionedDiffusionConstrainedSystem):
+        state = ConditionedDiffusionHamiltonianState(pos=q, x_obs_seq=x_obs_seq)
+        assert onp.allclose(system.constr(state), 0)
+    else:
+        state = ChainState(pos=q, mom=None, dir=1, _call_counts={})
     state.mom = system.sample_momentum(state, rng)
     return state
 
@@ -1522,6 +1531,7 @@ def find_initial_state_by_gradient_descent(
     max_iters=1000,
     max_num_tries=10,
     use_newton=True,
+    **model_dict,
 ):
     """Find an initial constraint satisying state by a gradient descent based scheme.
 
@@ -1531,6 +1541,59 @@ def find_initial_state_by_gradient_descent(
     `max(abs(constr(q)) < tol`.
     """
 
+    model_dict = system.model_dict if not model_dict else model_dict
+    num_step = model_dict["num_steps_per_obs"] * model_dict["num_obs"]
+    noisy_observations = model_dict["generate_σ"] is not None
+    dim_q = (
+        model_dict["dim_u"]
+        + model_dict["dim_v_0"]
+        + model_dict["dim_v"] * num_step
+        + (model_dict["num_obs"] * model_dict["dim_y"] if noisy_observations else 0)
+    )
+
+    @api.jit
+    def init_objective(q, x_obs_seq, reg_coeff):
+        """Optimisation objective to find initial state on manifold."""
+        if noisy_observations:
+            u, v_0, v_seq_flat, _ = split(
+                q,
+                (
+                    model_dict["dim_u"],
+                    model_dict["dim_v_0"],
+                    num_step * model_dict["dim_v"],
+                ),
+            )
+        else:
+            u, v_0, v_seq_flat = split(q, (model_dict["dim_u"], model_dict["dim_v_0"],))
+        v_subseqs = v_seq_flat.reshape(
+            (
+                model_dict["num_obs"],
+                model_dict["num_steps_per_obs"],
+                model_dict["dim_v"],
+            )
+        )
+        z = model_dict["generate_z"](u)
+        x_0 = model_dict["generate_x_0"](z, v_0)
+        x_inits = np.concatenate((x_0[None], x_obs_seq[:-1]), 0)
+
+        def step_func(x, v):
+            x_n = model_dict["forward_func"](z, x, v, model_dict["δ"])
+            return (x_n, x_n)
+
+        def generate_final_state(z, v_seq, x_0):
+            _, x_seq = lax.scan(step_func, x_0, v_seq)
+            return x_seq[-1]
+
+        c = (
+            api.vmap(generate_final_state, in_axes=(None, 0, 0))(z, v_subseqs, x_inits)
+            - x_obs_seq
+        )
+        return 0.5 * np.mean(c ** 2) + 0.5 * reg_coeff * np.mean(q ** 2), c
+
+    value_and_grad_init_objective = api.jit(
+        api.value_and_grad(init_objective, (0,), has_aux=True)
+    )
+
     # Use optimizers to set optimizer initialization and update functions
     opt_init, opt_update, get_params = opt.adam(adam_step_size)
 
@@ -1538,7 +1601,7 @@ def find_initial_state_by_gradient_descent(
     @api.jit
     def step(i, opt_state, x_obs_seq_init):
         (q,) = get_params(opt_state)
-        (obj, constr), grad = system.value_and_grad_init_objective(
+        (obj, constr), grad = value_and_grad_init_objective(
             q, x_obs_seq_init, reg_coeff
         )
         opt_state = opt_update(i, grad, opt_state)
@@ -1552,7 +1615,7 @@ def find_initial_state_by_gradient_descent(
 
     for t in range(max_num_tries):
         logging.info(f"Starting try {t+1}")
-        q_init = rng.standard_normal(system.dim_q)
+        q_init = rng.standard_normal(dim_q)
         x_obs_seq_init = generate_x_obs_seq_init(rng)
         opt_state = opt_init((q_init,))
         for i in range(max_iters):
@@ -1601,7 +1664,7 @@ def find_initial_state_by_gradient_descent_noisy_system(
     constructed by setting observation noise terms to residuals.
     """
 
-    model_dict = vars(system) if not model_dict else model_dict
+    model_dict = system.model_dict if not model_dict else model_dict
     num_step = model_dict["num_steps_per_obs"] * model_dict["num_obs"]
     dim_u_v = (
         model_dict["dim_u"] + model_dict["dim_v_0"] + num_step * model_dict["dim_v"]
