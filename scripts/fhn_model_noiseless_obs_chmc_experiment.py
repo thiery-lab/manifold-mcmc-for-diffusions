@@ -156,7 +156,7 @@ dir_name = (
     f"H_{args.num_inner_h2_step}_{args.splitting}_splitting_{timestamp}"
 )
 output_dir = os.path.join(
-    args.output_root_dir, "fitzhugh-nagumo_noiseless_chmc", dir_name
+    args.output_root_dir, "fhn_noiseless_chmc", dir_name
 )
 
 if not os.path.exists(output_dir):
