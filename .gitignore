@@ -27,6 +27,7 @@ MANIFEST
 
 # Experiments and generated data
 experiments/
+notebooks/
 chain-data
 
 # PyInstaller
