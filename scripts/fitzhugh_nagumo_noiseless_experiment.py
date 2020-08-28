@@ -1,4 +1,5 @@
 import os
+import logging
 import argparse
 import datetime
 import json
@@ -22,7 +23,7 @@ jax.config.update("jax_platform_name", "cpu")
 # Process command line arguments defining experiment parameters
 
 parser = argparse.ArgumentParser(
-    description="Run Fitzhugh-Nagumo diffusion model experiment"
+    description="Run Fitzhugh-Nagumo model experiment (noiseless observations, CHMC)"
 )
 parser.add_argument(
     "--output-root-dir",
@@ -79,6 +80,12 @@ parser.add_argument(
     type=float,
     default=0.8,
     help="Target acceptance statistic for step size adaptation",
+)
+parser.add_argument(
+    "--step-size-reg-coefficient",
+    type=float,
+    default=0.1,
+    help="Regularisation coefficient for step size adaptation",
 )
 parser.add_argument(
     "--seed", type=int, default=20200710, help="Seed for random number generator"
@@ -157,6 +164,12 @@ if not os.path.exists(output_dir):
 
 with open(os.path.join(output_dir, "args.json"), "w") as f:
     json.dump(vars(args), f, indent=2)
+
+logger = logging.getLogger()
+logger.setLevel(logging.INFO)
+logger.handlers = []
+logger.addHandler(logging.FileHandler(os.path.join(output_dir, "info.log")))
+
 
 # Define model specific constants and functions
 
@@ -272,7 +285,8 @@ sampler = mici.samplers.MarkovChainMonteCarloMethod(
 )
 
 step_size_adapter = mici.adapters.DualAveragingStepSizeAdapter(
-    args.step_size_adaptation_target
+    adapt_stat_target=args.step_size_adaptation_target,
+    log_step_size_reg_coefficient=args.step_size_reg_coefficient,
 )
 
 
@@ -286,7 +300,15 @@ def trace_func(state):
         name.split(".")[-1] + "_calls": val
         for (name, _), val in state._call_counts.items()
     }
-    return {"σ": z[0], "ϵ": z[1], "γ": z[2], "β": z[3], "x_0": x_0, **call_counts}
+    return {
+        "σ": z[0],
+        "ϵ": z[1],
+        "γ": z[2],
+        "β": z[3],
+        "x_0": x_0,
+        "hamiltonian": system.h(state),
+        **call_counts,
+    }
 
 
 # Initialise chain states
