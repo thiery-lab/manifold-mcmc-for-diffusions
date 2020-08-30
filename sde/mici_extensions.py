@@ -1200,7 +1200,7 @@ class ConditionedDiffusionConstrainedSystem(System):
 
     def h2_flow(self, state, dt):
         if self.use_gaussian_splitting:
-            sin_dt, cos_dt = np.sin(dt), np.cos(dt)
+            sin_dt, cos_dt = onp.sin(dt), onp.cos(dt)
             pos = state.pos.copy()
             state.pos *= cos_dt
             state.pos += sin_dt * state.mom
@@ -1211,7 +1211,7 @@ class ConditionedDiffusionConstrainedSystem(System):
 
     def dh2_flow_dmom(self, dt):
         if self.use_gaussian_splitting:
-            sin_dt, cos_dt = np.sin(dt), np.cos(dt)
+            sin_dt, cos_dt = onp.sin(dt), onp.cos(dt)
             return sin_dt * IdentityMatrix(), cos_dt * IdentityMatrix()
         else:
             return (dt * self.metric.inv, IdentityMatrix())
@@ -1369,7 +1369,7 @@ def jitted_solve_projection_onto_manifold_quasi_newton(
         if state.mom is not None:
             state.mom -= dh2_flow_mom_dmom @ onp.asarray(mu)
         return state
-    elif error > divergence_tol or np.isnan(error):
+    elif error > divergence_tol or onp.isnan(error):
         raise ConvergenceError(
             f"Quasi-Newton iteration diverged on iteration {i}. "
             f"Last |c|={error:.1e}, |δq|={norm_delta_q}."
@@ -1443,7 +1443,7 @@ def jitted_solve_projection_onto_manifold_newton(
         if state.mom is not None:
             state.mom -= dh2_flow_mom_dmom @ onp.asarray(mu)
         return state
-    elif error > divergence_tol or np.isnan(error):
+    elif error > divergence_tol or onp.isnan(error):
         raise ConvergenceError(
             f"Newton iteration diverged on iteration {i}. "
             f"Last |c|={error:.1e}, |δq|={norm_delta_q}."
@@ -1508,7 +1508,7 @@ def find_initial_state_by_linear_interpolation(
     z = model_dict["generate_z"](u)
     v_0 = rng.standard_normal(model_dict["dim_v_0"]) if v_0 is None else v_0
     x_0 = model_dict["generate_x_0"](z, v_0)
-    x_obs_seq = generate_x_obs_seq_init(rng)
+    x_obs_seq = onp.asarray(generate_x_obs_seq_init(rng))
     v_seq = solve_for_v_seq(x_obs_seq, x_0, z)
     if (
         isinstance(system, ConditionedDiffusionConstrainedSystem)
@@ -1627,13 +1627,14 @@ def find_initial_state_by_gradient_descent(
         opt_state = opt_init((q_init,))
         for i in range(max_iters):
             opt_state_next, norm, constr = step(i, opt_state, x_obs_seq_init)
-            if not np.isfinite(norm):
+            if not onp.isfinite(norm):
                 logger.info("Adam iteration diverged")
                 break
             max_abs_constr = maximum_norm(constr)
             if max_abs_constr < coarse_tol:
                 logging.info("Within coarse_tol attempting projection.")
                 (q_init,) = get_params(opt_state)
+                q_init = onp.asarray(q_init)
                 state = ConditionedDiffusionHamiltonianState(
                     q_init, x_obs_seq=x_obs_seq_init, _call_counts={}
                 )
@@ -1642,7 +1643,7 @@ def find_initial_state_by_gradient_descent(
                 except ConvergenceError as e:
                     logger.info(e)
                     break
-                if np.max(np.abs(system.constr(state))) < tol:
+                if onp.max(onp.abs(system.constr(state))) < tol:
                     logging.info("Found constraint satisfying state.")
                     state.mom = system.sample_momentum(state, rng)
                     return state
@@ -1729,7 +1730,7 @@ def find_initial_state_by_gradient_descent_noisy_system(
         while not found_valid_init_state and init_tries < max_init_tries:
             u_v = rng.standard_normal(dim_u_v)
             _, residuals = init_objective(u_v)
-            if np.all(np.isfinite(residuals)):
+            if onp.all(onp.isfinite(residuals)):
                 found_valid_init_state = True
             init_tries += 1
         if init_tries == max_init_tries:
@@ -1737,16 +1738,17 @@ def find_initial_state_by_gradient_descent_noisy_system(
                 f"Did not find valid initial state in {init_tries} tries."
             )
         opt_state = opt_init((u_v,))
-        prev_mean_residual_sq = np.mean(residuals ** 2)
+        prev_mean_residual_sq = onp.mean(residuals ** 2)
         for i in range(max_iters):
             opt_state_next, residuals = step(i, opt_state)
-            mean_residuals_sq = np.mean(residuals ** 2)
-            if not np.isfinite(mean_residuals_sq):
+            mean_residuals_sq = onp.mean(residuals ** 2)
+            if not onp.isfinite(mean_residuals_sq):
                 logger.info("Adam iteration diverged")
                 break
             if mean_residuals_sq < 1:
                 logging.info("Found point with mean sq. residual < 1.")
                 (u_v,) = get_params(opt_state)
+                u_v = onp.asarray(u_v)
                 if isinstance(system, ConditionedDiffusionConstrainedSystem):
                     state = ConditionedDiffusionHamiltonianState(
                         pos=onp.concatenate([u_v, residuals.flatten()]),
@@ -1832,8 +1834,8 @@ class OnlineBlockDiagonalMetricAdapter(Adapter):
         dtype = chain_state.pos.dtype
         return {
             "iter": 0,
-            "mean": np.zeros(shape=(self.dim_param,), dtype=dtype),
-            "sum_diff_outer": np.zeros(
+            "mean": onp.zeros(shape=(self.dim_param,), dtype=dtype),
+            "sum_diff_outer": onp.zeros(
                 shape=(self.dim_param, self.dim_param), dtype=dtype
             ),
             "dim_pos": chain_state.pos.shape[0],
@@ -1858,7 +1860,7 @@ class OnlineBlockDiagonalMetricAdapter(Adapter):
         Performed in place to prevent further array allocations.
         """
         covar_est *= n_iter / (self.reg_iter_offset + n_iter)
-        covar_est_diagonal = np.einsum("ii->i", covar_est)
+        covar_est_diagonal = onp.einsum("ii->i", covar_est)
         covar_est_diagonal += self.reg_scale * (
             self.reg_iter_offset / (self.reg_iter_offset + n_iter)
         )
@@ -1886,7 +1888,7 @@ class OnlineBlockDiagonalMetricAdapter(Adapter):
                     mean_est /= n_iter
                     covar_est += a["sum_diff_outer"]
                     covar_est += (
-                        np.outer(mean_diff, mean_diff)
+                        onp.outer(mean_diff, mean_diff)
                         * (a["iter"] * n_iter_prev)
                         / n_iter
                     )
