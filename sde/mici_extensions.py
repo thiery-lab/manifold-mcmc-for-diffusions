@@ -1520,7 +1520,6 @@ def find_initial_state_by_linear_interpolation(
         q = onp.concatenate([u, v_0, v_seq.flatten()])
     if isinstance(system, ConditionedDiffusionConstrainedSystem):
         state = ConditionedDiffusionHamiltonianState(pos=q, x_obs_seq=x_obs_seq)
-        assert onp.allclose(system.constr(state), 0)
     else:
         state = ChainState(pos=q, mom=None, dir=1, _call_counts={})
     state.mom = system.sample_momentum(state, rng)
@@ -1663,6 +1662,9 @@ def find_initial_state_by_gradient_descent_noisy_system(
     max_iters=1000,
     max_init_tries=100,
     max_num_tries=10,
+    threshold=1.,
+    slow_progress_ratio=0.8,
+    check_iter=100,
     **model_dict,
 ):
     """Find an initial constraint satisying state by a gradient descent based scheme.
@@ -1745,8 +1747,8 @@ def find_initial_state_by_gradient_descent_noisy_system(
             if not onp.isfinite(mean_residuals_sq):
                 logger.info("Adam iteration diverged")
                 break
-            if mean_residuals_sq < 1:
-                logging.info("Found point with mean sq. residual < 1.")
+            if mean_residuals_sq < threshold:
+                logging.info(f"Found point with mean sq. residual < {threshold}")
                 (u_v,) = get_params(opt_state)
                 u_v = onp.asarray(u_v)
                 if isinstance(system, ConditionedDiffusionConstrainedSystem):
@@ -1761,11 +1763,11 @@ def find_initial_state_by_gradient_descent_noisy_system(
                 state.mom = system.sample_momentum(state, rng)
                 return state
             opt_state = opt_state_next
-            if i % 100 == 0:
+            if i % check_iter == 0:
                 if (
                     i > 0
                     and i < max_iters // 2
-                    and (mean_residuals_sq / prev_mean_residual_sq) > 0.8
+                    and (mean_residuals_sq / prev_mean_residual_sq) > slow_progress_ratio
                 ):
                     logging.info("Slow progress, restarting")
                     break
