@@ -6,14 +6,14 @@ import matplotlib.pyplot as plt
 import numpy as np
 import arviz
 from utils import (
-    get_args_and_create_output_dir,
+    get_plot_args_and_create_output_dir,
     set_matplotlib_style,
     load_summary_data,
     load_traces,
 )
 
 
-args = get_args_and_create_output_dir(
+args = get_plot_args_and_create_output_dir(
     "Generate plot(s) for SIR model experiments", ("sir_chmc", "sir_hmc")
 )
 

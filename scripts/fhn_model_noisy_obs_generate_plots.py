@@ -3,13 +3,13 @@
 import os
 import matplotlib.pyplot as plt
 from utils import (
-    get_args_and_create_output_dir,
+    get_plot_args_and_create_output_dir,
     set_matplotlib_style,
     load_summary_data,
 )
 
 
-args = get_args_and_create_output_dir(
+args = get_plot_args_and_create_output_dir(
     "Generate plot(s) for FitzHugh-Nagumo model (noisy observations) experiments",
     ("fhn_noisy_chmc", "fhn_noisy_hmc", "fhn_noisy_bridge")
 )

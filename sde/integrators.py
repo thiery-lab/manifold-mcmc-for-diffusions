@@ -1,3 +1,5 @@
+"""Numerical timestepping methods for stochastic differential equation (SDE) systems."""
+
 import sympy
 import symnum
 import symnum.numpy as snp
@@ -204,4 +206,3 @@ def Lj_operator(diff_coeff, j=0):
         return Lj_func
 
     return Lj
-

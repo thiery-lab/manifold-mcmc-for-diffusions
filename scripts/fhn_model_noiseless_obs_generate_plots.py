@@ -5,7 +5,7 @@ import os
 import numpy as np
 import matplotlib.pyplot as plt
 from utils import (
-    get_args_and_create_output_dir,
+    get_plot_args_and_create_output_dir,
     set_matplotlib_style,
     load_summary_data,
     load_traces,
@@ -13,7 +13,7 @@ from utils import (
 )
 
 
-args = get_args_and_create_output_dir(
+args = get_plot_args_and_create_output_dir(
     "Generate plot(s) for FitzHugh-Nagumo model (noiseless observations) experiments",
     ("fhn_noiseless_chmc",),
 )
