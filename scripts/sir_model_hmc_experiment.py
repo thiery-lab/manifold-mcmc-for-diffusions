@@ -71,7 +71,7 @@ system, integrator, sampler, adapters = setup_hmc_mici_objects(
     sir,
     rng,
     data["obs_interval"],
-    data["y_seq_ref"],
+    data["y_seq"],
     dim_u,
     sir.generate_σ if variable_σ else args.observation_noise_std,
 )
