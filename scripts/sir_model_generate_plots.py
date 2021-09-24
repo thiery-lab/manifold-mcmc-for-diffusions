@@ -1,25 +1,44 @@
 """Generate plot(s) for SIR model experiments."""
 
+import argparse
 import copy
 import os
 import matplotlib.pyplot as plt
 import numpy as np
 import arviz
 from utils import (
-    get_plot_args_and_create_output_dir,
+    add_plot_args,
+    check_experiment_dir_and_create_output_dir,
     set_matplotlib_style,
     load_summary_data,
     load_traces,
 )
 
 
-args = get_plot_args_and_create_output_dir(
-    "Generate plot(s) for SIR model experiments", ("sir_chmc", "sir_hmc")
+experiment_subdirectories = ("sir_chmc", "sir_hmc")
+parser = argparse.ArgumentParser(
+    description="Generate plot(s) for SIR model experiments"
 )
+add_plot_args(parser, experiment_subdirectories)
+parser.add_argument(
+    "--obs-noise-std-grid",
+    type=float,
+    nargs="+",
+    default=[0.3162, 1, 3.162, 10, -1],
+    help="Grid of observation noise standard deviations to use (-1 indicates variable)",
+)
+args = parser.parse_args()
+
+check_experiment_dir_and_create_output_dir(args, experiment_subdirectories)
 
 set_matplotlib_style()
 
-σ_vals = ["variable"]
+# -1 value indicates variable (unknown to be inferred) observation noise std
+if -1 in args.obs_noise_std_grid:
+
+    # remove -1 value so not included in fixed observation noise std plot below
+    args.obs_noise_std_grid.remove(-1)
+
 orig_param_names = ["α₀", "β", "γ", "ζ", "ϵ", "σ"]
 param_rename_map = {
     "α₀": "c(0)",
@@ -31,20 +50,23 @@ param_rename_map = {
 }
 param_names = [param_rename_map[param] for param in orig_param_names]
 
+    exp_param_sets = [{"σ": "variable"}]
 summary_data = {
     "Constrained HMC": load_summary_data(
         exp_dir_pattern=os.path.join(
             args.experiment_dir, "sir_chmc", "σ_{σ}_H_1_standard_splitting_*"
         ),
-        exp_param_sets=[{"σ": σ} for σ in σ_vals],
+            exp_param_sets=exp_param_sets,
         var_names=orig_param_names,
         var_rename_map=param_rename_map,
     ),
     "Standard HMC": load_summary_data(
         exp_dir_pattern=os.path.join(
-            args.experiment_dir, "sir_hmc", "σ_{σ}_standard_splitting_diagonal_metric_*"
+                args.experiment_dir,
+                "sir_hmc",
+                "σ_{σ}_standard_splitting_diagonal_metric_*",
         ),
-        exp_param_sets=[{"σ": σ} for σ in σ_vals],
+            exp_param_sets=exp_param_sets,
         var_names=orig_param_names,
         var_rename_map=param_rename_map,
     ),
@@ -55,15 +77,17 @@ trace_data = {
         exp_dir_pattern=os.path.join(
             args.experiment_dir, "sir_chmc", "σ_{σ}_H_1_standard_splitting_*"
         ),
-        exp_param_sets=[{"σ": σ} for σ in σ_vals],
+            exp_param_sets=exp_param_sets,
         var_names=orig_param_names,
         var_rename_map=param_rename_map,
     )["variable",][0],
     "Standard HMC": load_traces(
         exp_dir_pattern=os.path.join(
-            args.experiment_dir, "sir_hmc", "σ_{σ}_standard_splitting_diagonal_metric_*"
+                args.experiment_dir,
+                "sir_hmc",
+                "σ_{σ}_standard_splitting_diagonal_metric_*",
         ),
-        exp_param_sets=[{"σ": σ} for σ in σ_vals],
+            exp_param_sets=exp_param_sets,
         var_names=orig_param_names,
         var_rename_map=param_rename_map,
     )["variable",][0],

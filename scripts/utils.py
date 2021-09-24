@@ -384,8 +384,49 @@ def save_and_print_summary(output_dir, traces, summary_vars, sampling_time, inte
     return summary_dict
 
 
-def get_plot_args_and_create_output_dir(description, experiment_subdirectories):
-    parser = argparse.ArgumentParser(description=description)
+def add_experiment_grid_args(parser):
+    parser.add_argument(
+        "--default-num-obs-per-subseq",
+        type=int,
+        default=5,
+        help="Default value for num. obs. times per subsequence when not grid variable",
+    )
+    parser.add_argument(
+        "--default-num-steps-per-obs",
+        type=int,
+        default=25,
+        help="Default value for number of steps per obs. time when not grid variable",
+    )
+    parser.add_argument(
+        "--default-num-obs",
+        type=int,
+        default=100,
+        help="Default value for number of observation times when not grid variable",
+    )
+    parser.add_argument(
+        "--num-obs-per-subseq-grid",
+        type=int,
+        nargs="+",
+        default=[2, 5, 10, 20, 50, 100],
+        help="Values for number of obs. times per subsequence when grid variable",
+    )
+    parser.add_argument(
+        "--num-steps-per-obs-grid",
+        type=int,
+        nargs="+",
+        default=[25, 50, 100, 200, 400],
+        help="Values for number of steps per observation time when grid variable",
+    )
+    parser.add_argument(
+        "--num-obs-grid",
+        type=int,
+        nargs="+",
+        default=[25, 50, 100, 200, 400],
+        help="Values for number of observation times when grid variable",
+    )
+
+
+def add_plot_args(parser, experiment_subdirectories):
     parser.add_argument(
         "--experiment-dir",
         type=Path,
@@ -407,7 +448,9 @@ def get_plot_args_and_create_output_dir(description, experiment_subdirectories):
         default="figures",
         help="Directory to save figures to",
     )
-    args = parser.parse_args()
+
+
+def check_experiment_dir_and_create_output_dir(args, experiment_subdirectories):
     for subdir in experiment_subdirectories:
         if not os.path.exists(os.path.join(args.experiment_dir, subdir)):
             raise ValueError(
@@ -416,7 +459,6 @@ def get_plot_args_and_create_output_dir(description, experiment_subdirectories):
             )
     if not os.path.exists(args.output_dir):
         os.makedirs(args.output_dir)
-    return args
 
 
 def set_matplotlib_style():

@@ -1,22 +1,34 @@
 """Generate plot(s) for FitzHugh-Nagumo model (noisy observations) experiments."""
 
+import argparse
 import os
 import matplotlib.pyplot as plt
 from utils import (
-    get_plot_args_and_create_output_dir,
+    add_plot_args,
+    check_experiment_dir_and_create_output_dir,
     set_matplotlib_style,
     load_summary_data,
 )
 
 
-args = get_plot_args_and_create_output_dir(
-    "Generate plot(s) for FitzHugh-Nagumo model (noisy observations) experiments",
-    ("fhn_noisy_chmc", "fhn_noisy_hmc", "fhn_noisy_bridge")
+experiment_subdirectories = ("fhn_noisy_chmc", "fhn_noisy_hmc", "fhn_noisy_bridge")
+parser = argparse.ArgumentParser(
+    description="Generate plot(s) for FitzHugh-Nagumo model (noisy obs.) experiments"
 )
+add_plot_args(parser, experiment_subdirectories)
+parser.add_argument(
+    "--obs-noise-std-grid",
+    type=float,
+    nargs="+",
+    default=[0.01, 0.03162, 0.1, 0.3162],
+    help="Grid of observation noise standard deviations to use",
+)
+args = parser.parse_args()
+
+check_experiment_dir_and_create_output_dir(args, experiment_subdirectories)
 
 set_matplotlib_style()
 
-σ_vals = [0.01, 0.03162, 0.1, 0.3162]
 param_names = ["β", "γ", "σ", "ϵ"]
 
 summary_data = {
@@ -24,7 +36,7 @@ summary_data = {
         exp_dir_pattern=os.path.join(
             args.experiment_dir, "fhn_noisy_chmc", "σ_{σ:.2g}_H_1_standard_splitting_*"
         ),
-        exp_param_sets=[{"σ": σ} for σ in σ_vals],
+        exp_param_sets=[{"σ": σ} for σ in args.obs_noise_std_grid],
         var_names=param_names,
     ),
     "Standard HMC": load_summary_data(
@@ -33,14 +45,14 @@ summary_data = {
             "fhn_noisy_hmc",
             "σ_{σ:.2g}_standard_splitting_diagonal_metric_*",
         ),
-        exp_param_sets=[{"σ": σ} for σ in σ_vals],
+        exp_param_sets=[{"σ": σ} for σ in args.obs_noise_std_grid],
         var_names=param_names,
     ),
     "Guided proposals / RWM": load_summary_data(
         exp_dir_pattern=os.path.join(
             args.experiment_dir, "fhn_noisy_bridge", "σ_{σ:.2g}_*"
         ),
-        exp_param_sets=[{"σ": σ} for σ in σ_vals],
+        exp_param_sets=[{"σ": σ} for σ in args.obs_noise_std_grid],
         var_names=["s", "γ", "σ", "ϵ"],
         var_rename_map={"s": "β"},
     ),
@@ -63,7 +75,7 @@ for ax, param in zip(axes, param_names):
         )
     ax.set(
         title=f"${param}$",
-        xticks=σ_vals,
+        xticks=args.obs_noise_std_grid,
         xlabel="$\\sigma_y$",
         xscale="log",
         yscale="log",

@@ -1,22 +1,29 @@
 """Generate plot(s) for FitzHugh-Nagumo model (noisless observations) experiments."""
 
+import argparse
 import json
 import os
 import numpy as np
 import matplotlib.pyplot as plt
 from utils import (
-    get_plot_args_and_create_output_dir,
+    add_experiment_grid_args,
+    add_plot_args,
+    check_experiment_dir_and_create_output_dir,
     set_matplotlib_style,
     load_summary_data,
     load_traces,
     plot_log_log_least_squares,
 )
 
-
-args = get_plot_args_and_create_output_dir(
-    "Generate plot(s) for FitzHugh-Nagumo model (noiseless observations) experiments",
-    ("fhn_noiseless_chmc",),
+experiment_subdirectories = ("fhn_noiseless_chmc",)
+parser = argparse.ArgumentParser(
+    description="Generate plot(s) for FitzHugh-Nagumo model (noiseless obs) experiments"
 )
+add_plot_args(parser, experiment_subdirectories)
+add_experiment_grid_args(parser)
+args = parser.parse_args()
+
+check_experiment_dir_and_create_output_dir(args, experiment_subdirectories)
 
 set_matplotlib_style()
 
@@ -53,9 +60,30 @@ av_call_times = {
 
 splittings = ("standard", "gaussian")
 exp_param_grids = {
-    "R": [{"R": r, "S": 25, "T": 100} for r in (2, 5, 10, 20, 50, 100)],
-    "S": [{"R": 5, "S": s, "T": 100} for s in (25, 50, 100, 200, 400)],
-    "T": [{"R": 5, "S": 25, "T": t} for t in (25, 50, 100, 200, 400)],
+    "R": [
+        {
+            "R": num_obs_per_subseq,
+            "S": args.default_num_steps_per_obs,
+            "T": args.default_num_obs,
+        }
+        for num_obs_per_subseq in args.num_obs_per_subseq_grid
+    ],
+    "S": [
+        {
+            "R": args.default_num_obs_per_subseq,
+            "S": num_steps_per_obs,
+            "T": args.default_num_obs,
+        }
+        for num_steps_per_obs in args.num_steps_per_obs_grid
+    ],
+    "T": [
+        {
+            "R": args.default_num_obs_per_subseq,
+            "S": args.default_num_steps_per_obs,
+            "T": num_obs,
+        }
+        for num_obs in args.num_obs_grid
+    ],
 }
 
 func_names = [
@@ -136,7 +164,7 @@ for ax, plot_param in zip(axes, ("R", "S", "T")):
 
 
 axes[0].set_ylabel("$\\hat{\\tau}_{\\rm step} ~/~ {\\rm s}$")
-R_vals = np.array([2, 5, 10, 20, 50, 100])
+R_vals = np.array(args.num_obs_per_subseq_grid)
 axes[0].autoscale(False)
 (handle2,) = axes[0].plot(R_vals, R_vals ** 2 * 0.000012, "k", ls="--", dashes=(1, 5))
 axes[0].text(25, 0.003, "$\\hat{\\tau}_{\\rm step} \\propto {\\tt R^2}$", fontsize=8)
@@ -205,8 +233,8 @@ for ax, param in zip(axes, ("β", "γ", "σ", "ϵ")):
     ax.set(
         title=f"${param}$",
         xlabel="$\\mathtt{R}$",
-        xticks=[2, 5, 10, 20, 50, 100],
-        xticklabels=[2, 5, 10, 20, 50, 100],
+        xticks=args.num_obs_per_subseq_grid,
+        xticklabels=args.num_obs_per_subseq_grid,
         ylim=(0.1, 10),
         yticks=[1e-1, 1e0, 1e1],
     )
@@ -258,8 +286,8 @@ for ax, param in zip(axes, ("β", "γ", "σ", "ϵ")):
     ax.set(
         title=f"${param}$",
         xlabel="$\\mathtt{S}$",
-        xticks=[25, 50, 100, 200, 400],
-        xticklabels=[25, 50, 100, 200, 400],
+        xticks=args.num_steps_per_obs_grid,
+        xticklabels=args.num_steps_per_obs_grid,
         ylim=(0.1, 100),
         yticks=[1e-1, 1e0, 1e1, 1e2],
     )
@@ -310,8 +338,8 @@ for ax, param in zip(axes, ("β", "γ", "σ", "ϵ")):
     ax.set(
         title=f"${param}$",
         xlabel="$\\mathtt{T}$",
-        xticks=[25, 50, 100, 200, 400],
-        xticklabels=[25, 50, 100, 200, 400],
+        xticks=args.num_obs_grid,
+        xticklabels=args.num_obs_grid,
         ylim=(0.01, 10),
         yticks=[1e-2, 1e-1, 1e0, 1e1],
     )
