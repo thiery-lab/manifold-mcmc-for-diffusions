@@ -13,7 +13,8 @@ from utils import (
 
 experiment_subdirectories = ("fhn_noisy_chmc", "fhn_noisy_hmc", "fhn_noisy_bridge")
 parser = argparse.ArgumentParser(
-    description="Generate plot(s) for FitzHugh-Nagumo model (noisy obs.) experiments"
+    description="Generate plot(s) for FitzHugh-Nagumo model (noisy obs.) experiments",
+    formatter_class=argparse.ArgumentDefaultsHelpFormatter,
 )
 add_plot_args(parser, experiment_subdirectories)
 parser.add_argument(

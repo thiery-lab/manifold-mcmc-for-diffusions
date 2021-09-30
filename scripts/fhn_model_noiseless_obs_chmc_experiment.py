@@ -25,7 +25,8 @@ setup_jax()
 # Process command line arguments defining experiment parameters
 
 parser = argparse.ArgumentParser(
-    description="Run Fitzhugh-Nagumo model experiment (noiseless observations, CHMC)"
+    description="Run Fitzhugh-Nagumo model experiment (noiseless observations, CHMC)",
+    formatter_class=argparse.ArgumentDefaultsHelpFormatter,
 )
 add_common_experiment_args(
     parser,

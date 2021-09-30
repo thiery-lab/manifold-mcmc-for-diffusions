@@ -72,7 +72,8 @@ setup_jax()
 # Process command line arguments defining experiment parameters
 
 parser = argparse.ArgumentParser(
-    description="Compute Fitzhugh-Nagumo model (noiseless) CHMC operation times"
+    description="Compute Fitzhugh-Nagumo model (noiseless) CHMC operation times",
+    formatter_class=argparse.ArgumentDefaultsHelpFormatter,
 )
 parser.add_argument(
     "--num-reps",

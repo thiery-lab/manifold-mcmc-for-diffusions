@@ -25,7 +25,10 @@ setup_jax()
 
 # Process command line arguments defining experiment parameters
 
-parser = argparse.ArgumentParser(description="Run SIR model experiment (CHMC)")
+parser = argparse.ArgumentParser(
+    description="Run SIR model experiment (CHMC)",
+    formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+)
 add_common_experiment_args(
     parser,
     default_num_steps_per_obs=20,

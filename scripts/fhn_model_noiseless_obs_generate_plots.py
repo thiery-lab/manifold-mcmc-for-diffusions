@@ -17,7 +17,8 @@ from utils import (
 
 experiment_subdirectories = ("fhn_noiseless_chmc",)
 parser = argparse.ArgumentParser(
-    description="Generate plot(s) for FitzHugh-Nagumo model (noiseless obs) experiments"
+    description="Generate plot(s) for FitzHugh-Nagumo model (noiseless obs) experiments",
+    formatter_class=argparse.ArgumentDefaultsHelpFormatter,
 )
 add_plot_args(parser, experiment_subdirectories)
 add_experiment_grid_args(parser)

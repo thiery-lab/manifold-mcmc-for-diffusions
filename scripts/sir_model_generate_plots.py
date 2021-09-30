@@ -17,7 +17,8 @@ from utils import (
 
 experiment_subdirectories = ("sir_chmc", "sir_hmc")
 parser = argparse.ArgumentParser(
-    description="Generate plot(s) for SIR model experiments"
+    description="Generate plot(s) for SIR model experiments",
+    formatter_class=argparse.ArgumentDefaultsHelpFormatter,
 )
 add_plot_args(parser, experiment_subdirectories)
 parser.add_argument(
