@@ -99,7 +99,7 @@ if not os.path.exists(output_dir):
     os.makedirs(output_dir)
 
 rng = np.random.default_rng(20200710)
-max_num_obs = max(args.num_obs_grid)
+max_num_obs = max(*args.num_obs_grid, args.default_num_obs)
 num_steps_per_obs_data = 10000
 obs_interval = 0.2
 δ = obs_interval / num_steps_per_obs_data
@@ -119,7 +119,7 @@ for num_obs_per_subseq, num_steps_per_obs, num_obs in chain(
     ),
     zip(
         repeat(args.default_num_obs_per_subseq),
-        args.num_obs_per_subseq_grid,
+        args.num_steps_per_obs_grid,
         repeat(args.default_num_obs),
     ),
     zip(
