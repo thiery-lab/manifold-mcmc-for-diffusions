@@ -1,10 +1,12 @@
 import logging
 from numbers import Number
+from functools import partial
 import numpy as onp
+import jax
 import jax.numpy as np
 import jax.numpy.linalg as nla
 import jax.scipy.linalg as sla
-from jax import lax, api
+from jax import lax
 import jax.experimental.optimizers as opt
 from mici.systems import (
     System,
@@ -160,7 +162,7 @@ def conditioned_diffusion_neg_log_dens_and_grad(
         def generate_σ(u):
             return σ
 
-    @api.jit
+    @jax.jit
     def _neg_log_dens(q):
         num_step = num_steps_per_obs * num_obs
         u, v_0, v_seq_flat = split(q, (dim_u, dim_v_0, dim_v * num_step))
@@ -181,7 +183,7 @@ def conditioned_diffusion_neg_log_dens_and_grad(
             + (0 if use_gaussian_splitting else 0.5 * np.sum(q ** 2))
         )
 
-    _grad_neg_log_dens = api.jit(api.value_and_grad(_neg_log_dens))
+    _grad_neg_log_dens = jax.jit(jax.value_and_grad(_neg_log_dens))
 
     if return_jax_funcs:
         return _neg_log_dens, lambda q: _grad_neg_log_dens(q)[::-1]
@@ -374,12 +376,12 @@ class ConditionedDiffusionConstrainedSystem(System):
             "y_seq": y_seq,
         }
 
-        @api.jit
+        @jax.jit
         def step_func(z, x, v):
             x_n = forward_func(z, x, v, δ)
             return (x_n, x_n)
 
-        @api.jit
+        @jax.jit
         def generate_x_obs_seq(q):
             """Generate state sequence at observation time indices."""
             if noisy_observations:
@@ -408,7 +410,7 @@ class ConditionedDiffusionConstrainedSystem(System):
             else:
                 return np.concatenate((y_seq[:-1].flatten(), x_seq[-1]))
 
-        @api.partial(api.jit, static_argnums=(4,))
+        @partial(jax.jit, static_argnames=("partition",))
         def partition_into_subseqs(v_seq, v_0, n_seq, x_obs_seq, partition=0):
             """Partition noise and observation sequences into subsequences.
 
@@ -468,7 +470,7 @@ class ConditionedDiffusionConstrainedSystem(System):
             y_bars.append(y_subseqs[partition][-1].flatten())
             return v_subseqs, n_subseqs, w_inits, y_bars
 
-        @api.partial(api.jit, static_argnums=(2,))
+        @partial(jax.jit, static_argnames=("partition",))
         def constr(q, x_obs_seq, partition=0):
             """Calculate constraint function for current partition."""
             if noisy_observations:
@@ -486,7 +488,7 @@ class ConditionedDiffusionConstrainedSystem(System):
             )
             partition_size = len(v_subseqs)
             gen_funcs = [
-                api.vmap(
+                jax.vmap(
                     generate_y_bar,
                     (None, 0, 0, 0 if noisy_observations else None, None, None),
                 )
@@ -516,7 +518,7 @@ class ConditionedDiffusionConstrainedSystem(System):
                 ]
             )
 
-        @api.partial(api.jit, static_argnums=(2,))
+        @partial(jax.jit, static_argnames=("partition",))
         def jacob_constr_blocks(q, x_obs_seq, partition=0):
             """Return non-zero blocks of constraint function Jacobian.
 
@@ -586,9 +588,9 @@ class ConditionedDiffusionConstrainedSystem(System):
                     if subseqs_are_batched[partition][b]
                     else v_subseqs[b].flatten()
                 )
-            jacob_g_y_bar = api.jacrev(g_y_bar, (0, 1))
+            jacob_g_y_bar = jax.jacrev(g_y_bar, (0, 1))
             jacob_funcs = [
-                api.vmap(
+                jax.vmap(
                     jacob_g_y_bar,
                     (None, 0, 0 if noisy_observations else None, 0, None, None),
                 )
@@ -621,7 +623,7 @@ class ConditionedDiffusionConstrainedSystem(System):
             )
             return dc_du_blocks, dc_dv_blocks, dc_dn_blocks
 
-        @api.jit
+        @jax.jit
         def chol_gram_blocks(dc_du_blocks, dc_dv_blocks, dc_dn_blocks):
             """Calculate Cholesky factors of decomposition of `∂c(q) M⁻¹ ∂c(q)ᵀ`.
 
@@ -684,7 +686,7 @@ class ConditionedDiffusionConstrainedSystem(System):
             )
             return chol_C, chol_D_blocks
 
-        @api.jit
+        @jax.jit
         def lu_jacob_product_blocks(
             dc_du_l_blocks,
             dc_dv_l_blocks,
@@ -795,7 +797,7 @@ class ConditionedDiffusionConstrainedSystem(System):
             else:
                 return metric.blocks[0].array
 
-        @api.jit
+        @jax.jit
         def log_det_sqrt_gram_from_chol(chol_C, chol_D_blocks):
             """Calculate log-determinant of Gram matrix from block Cholesky factors."""
             return (
@@ -807,7 +809,7 @@ class ConditionedDiffusionConstrainedSystem(System):
                 - log_det_sqrt_metric_0
             )
 
-        @api.partial(api.jit, static_argnums=(2,))
+        @partial(jax.jit, static_argnames=("partition",))
         def log_det_sqrt_gram(q, x_obs_seq, partition=0):
             """Calculate log-determinant of constraint Jacobian Gram matrix."""
             jac_blocks = jacob_constr_blocks(q, x_obs_seq, partition)
@@ -817,7 +819,7 @@ class ConditionedDiffusionConstrainedSystem(System):
                 (jac_blocks, chol_blocks),
             )
 
-        @api.jit
+        @jax.jit
         def lmult_by_jacob_constr(dc_du_blocks, dc_dv_blocks, dc_dn_blocks, vct):
             """Left-multiply vector by constraint Jacobian matrix."""
             if noisy_observations:
@@ -874,7 +876,7 @@ class ConditionedDiffusionConstrainedSystem(System):
                 )
             return jacob_vct
 
-        @api.jit
+        @jax.jit
         def rmult_by_jacob_constr(dc_du_blocks, dc_dv_blocks, dc_dn_blocks, vct):
             """Right-multiply vector by constraint Jacobian matrix."""
             vct_parts = split_and_reshape(
@@ -910,7 +912,7 @@ class ConditionedDiffusionConstrainedSystem(System):
                 )
             )
 
-        @api.jit
+        @jax.jit
         def lmult_by_inv_gram(
             dc_du_blocks, dc_dv_blocks, dc_dn_blocks, chol_C, chol_D_blocks, vct
         ):
@@ -939,7 +941,7 @@ class ConditionedDiffusionConstrainedSystem(System):
                 ]
             )
 
-        @api.jit
+        @jax.jit
         def lmult_by_inv_jacob_product(
             dc_du_l_blocks,
             dc_dv_l_blocks,
@@ -978,7 +980,7 @@ class ConditionedDiffusionConstrainedSystem(System):
                 ]
             )
 
-        @api.jit
+        @jax.jit
         def normal_space_component(vct, jacob_constr_blocks, chol_gram_blocks):
             """Compute component of vector in normal space to manifold at a point."""
             return rmult_by_jacob_constr(
@@ -994,7 +996,16 @@ class ConditionedDiffusionConstrainedSystem(System):
             """Infinity norm of a vector."""
             return np.max(np.abs(x))
 
-        @api.partial(api.jit, static_argnums=(2, 6, 7, 8, 9))
+        @partial(
+            jax.jit,
+            static_argnames=(
+                "partition",
+                "convergence_tol",
+                "position_tol",
+                "divergence_tol",
+                "max_iters",
+            ),
+        )
         def quasi_newton_projection(
             q,
             x_obs_seq,
@@ -1051,7 +1062,16 @@ class ConditionedDiffusionConstrainedSystem(System):
             else:
                 return q, mu / dt, i, norm_delta_q, error
 
-        @api.partial(api.jit, static_argnums=(2, 5, 6, 7, 8))
+        @partial(
+            jax.jit,
+            static_argnames=(
+                "partition",
+                "convergence_tol",
+                "position_tol",
+                "divergence_tol",
+                "max_iters",
+            ),
+        )
         def newton_projection(
             q,
             x_obs_seq,
@@ -1120,8 +1140,9 @@ class ConditionedDiffusionConstrainedSystem(System):
         self._chol_gram_blocks = chol_gram_blocks
         self._lu_jacob_product_blocks = lu_jacob_product_blocks
         self._log_det_sqrt_gram_from_chol = log_det_sqrt_gram_from_chol
-        self._grad_log_det_sqrt_gram = api.jit(
-            api.value_and_grad(log_det_sqrt_gram, has_aux=True), (2,)
+        self._grad_log_det_sqrt_gram = jax.jit(
+            jax.value_and_grad(log_det_sqrt_gram, has_aux=True),
+            static_argnames=("partition",),
         )
         self._normal_space_component = normal_space_component
         self._quasi_newton_projection = quasi_newton_projection
@@ -1477,9 +1498,9 @@ def find_initial_state_by_linear_interpolation(
         def step_diff_func(v):
             return model_dict["forward_func"](z, x, v, δ) - x
 
-        return step_diff_func(v), api.jacobian(step_diff_func)(v)
+        return step_diff_func(v), jax.jacobian(step_diff_func)(v)
 
-    @api.jit
+    @jax.jit
     def solve_for_v_seq(x_obs_seq, x_0, z):
         num_obs = x_obs_seq.shape[0]
 
@@ -1495,12 +1516,12 @@ def find_initial_state_by_linear_interpolation(
                 x_0[None]
                 + np.arange(model_dict["num_steps_per_obs"])[:, None] * Δx[None]
             )
-            return api.vmap(solve_inner, (0, None))(x_seq, Δx)
+            return jax.vmap(solve_inner, (0, None))(x_seq, Δx)
 
         x_0_seq = np.concatenate((x_0[None], x_obs_seq[:-1]))
         x_1_seq = x_obs_seq
 
-        return api.vmap(solve_outer)(x_0_seq, x_1_seq).reshape(
+        return jax.vmap(solve_outer)(x_0_seq, x_1_seq).reshape(
             (num_obs * model_dict["num_steps_per_obs"], model_dict["dim_v"])
         )
 
@@ -1557,7 +1578,7 @@ def find_initial_state_by_gradient_descent(
         + (model_dict["num_obs"] * model_dict["dim_y"] if noisy_observations else 0)
     )
 
-    @api.jit
+    @jax.jit
     def init_objective(q, x_obs_seq, reg_coeff):
         """Optimisation objective to find initial state on manifold."""
         if noisy_observations:
@@ -1591,20 +1612,20 @@ def find_initial_state_by_gradient_descent(
             return x_seq[-1]
 
         c = (
-            api.vmap(generate_final_state, in_axes=(None, 0, 0))(z, v_subseqs, x_inits)
+            jax.vmap(generate_final_state, in_axes=(None, 0, 0))(z, v_subseqs, x_inits)
             - x_obs_seq
         )
         return 0.5 * np.mean(c ** 2) + 0.5 * reg_coeff * np.mean(q ** 2), c
 
-    value_and_grad_init_objective = api.jit(
-        api.value_and_grad(init_objective, (0,), has_aux=True)
+    value_and_grad_init_objective = jax.jit(
+        jax.value_and_grad(init_objective, (0,), has_aux=True)
     )
 
     # Use optimizers to set optimizer initialization and update functions
     opt_init, opt_update, get_params = opt.adam(adam_step_size)
 
     # Define a compiled update step
-    @api.jit
+    @jax.jit
     def step(i, opt_state, x_obs_seq_init):
         (q,) = get_params(opt_state)
         (obj, constr), grad = value_and_grad_init_objective(
@@ -1662,7 +1683,7 @@ def find_initial_state_by_gradient_descent_noisy_system(
     max_iters=1000,
     max_init_tries=100,
     max_num_tries=10,
-    threshold=1.,
+    threshold=1.0,
     slow_progress_ratio=0.8,
     check_iter=100,
     **model_dict,
@@ -1680,7 +1701,7 @@ def find_initial_state_by_gradient_descent_noisy_system(
         model_dict["dim_u"] + model_dict["dim_v_0"] + num_step * model_dict["dim_v"]
     )
 
-    @api.jit
+    @jax.jit
     def init_objective(u_v):
         """Optimisation objective to find initial state for noisy systems."""
         num_step = model_dict["num_steps_per_obs"] * model_dict["num_obs"]
@@ -1713,13 +1734,13 @@ def find_initial_state_by_gradient_descent_noisy_system(
             residuals,
         )
 
-    grad_init_objective = api.jit(api.grad(init_objective, has_aux=True))
+    grad_init_objective = jax.jit(jax.grad(init_objective, has_aux=True))
 
     # Use optimizers to set optimizer initialization and update functions
     opt_init, opt_update, get_params = opt.adam(adam_step_size)
 
     # Define a compiled update step
-    @api.jit
+    @jax.jit
     def step(i, opt_state):
         (u_v,) = get_params(opt_state)
         grad, residuals = grad_init_objective(u_v)
@@ -1767,7 +1788,8 @@ def find_initial_state_by_gradient_descent_noisy_system(
                 if (
                     i > 0
                     and i < max_iters // 2
-                    and (mean_residuals_sq / prev_mean_residual_sq) > slow_progress_ratio
+                    and (mean_residuals_sq / prev_mean_residual_sq)
+                    > slow_progress_ratio
                 ):
                     logging.info("Slow progress, restarting")
                     break
