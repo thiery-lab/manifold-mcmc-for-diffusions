@@ -1000,7 +1000,7 @@ class ConditionedDiffusionConstrainedSystem(System):
             jax.jit,
             static_argnames=(
                 "partition",
-                "convergence_tol",
+                "constraint_tol",
                 "position_tol",
                 "divergence_tol",
                 "max_iters",
@@ -1013,7 +1013,7 @@ class ConditionedDiffusionConstrainedSystem(System):
             jacob_constr_blocks_prev,
             chol_gram_blocks_prev,
             dt,
-            convergence_tol,
+            constraint_tol,
             position_tol,
             divergence_tol,
             max_iters,
@@ -1048,7 +1048,7 @@ class ConditionedDiffusionConstrainedSystem(System):
                 _, _, i, norm_delta_q, error, = val
                 diverged = np.logical_or(error > divergence_tol, np.isnan(error))
                 converged = np.logical_and(
-                    error < convergence_tol, norm_delta_q < position_tol
+                    error < constraint_tol, norm_delta_q < position_tol
                 )
                 return np.logical_not(
                     np.logical_or((i >= max_iters), np.logical_or(diverged, converged))
@@ -1066,7 +1066,7 @@ class ConditionedDiffusionConstrainedSystem(System):
             jax.jit,
             static_argnames=(
                 "partition",
-                "convergence_tol",
+                "constraint_tol",
                 "position_tol",
                 "divergence_tol",
                 "max_iters",
@@ -1078,7 +1078,7 @@ class ConditionedDiffusionConstrainedSystem(System):
             partition,
             jacob_constr_blocks_prev,
             dt,
-            convergence_tol,
+            constraint_tol,
             position_tol,
             divergence_tol,
             max_iters,
@@ -1120,7 +1120,7 @@ class ConditionedDiffusionConstrainedSystem(System):
                 _, _, i, norm_delta_q, error = val
                 diverged = np.logical_or(error > divergence_tol, np.isnan(error))
                 converged = np.logical_and(
-                    error < convergence_tol, norm_delta_q < position_tol
+                    error < constraint_tol, norm_delta_q < position_tol
                 )
                 return np.logical_not(
                     np.logical_or((i >= max_iters), np.logical_or(diverged, converged))
@@ -1325,7 +1325,7 @@ def jitted_solve_projection_onto_manifold_quasi_newton(
     state_prev,
     dt,
     system,
-    convergence_tol=1e-8,
+    constraint_tol=1e-8,
     position_tol=1e-8,
     divergence_tol=1e10,
     max_iters=50,
@@ -1374,7 +1374,7 @@ def jitted_solve_projection_onto_manifold_quasi_newton(
         jacob_constr_blocks_prev,
         chol_gram_blocks_prev,
         dt,
-        convergence_tol,
+        constraint_tol,
         position_tol,
         divergence_tol,
         max_iters,
@@ -1385,7 +1385,7 @@ def jitted_solve_projection_onto_manifold_quasi_newton(
             state._call_counts[key] += i
         else:
             state._call_counts[key] = i
-    if error < convergence_tol and norm_delta_q < position_tol:
+    if error < constraint_tol and norm_delta_q < position_tol:
         state.pos = onp.array(q_)
         if state.mom is not None:
             state.mom -= dh2_flow_mom_dmom @ onp.asarray(mu)
@@ -1407,7 +1407,7 @@ def jitted_solve_projection_onto_manifold_newton(
     state_prev,
     dt,
     system,
-    convergence_tol=1e-8,
+    constraint_tol=1e-8,
     position_tol=1e-8,
     divergence_tol=1e10,
     max_iters=50,
@@ -1443,7 +1443,7 @@ def jitted_solve_projection_onto_manifold_newton(
         partition,
         jacob_constr_blocks_prev,
         dt,
-        convergence_tol,
+        constraint_tol,
         position_tol,
         divergence_tol,
         max_iters,
@@ -1459,7 +1459,7 @@ def jitted_solve_projection_onto_manifold_newton(
                 state._call_counts[key] += i
             else:
                 state._call_counts[key] = i
-    if error < convergence_tol and norm_delta_q < position_tol:
+    if error < constraint_tol and norm_delta_q < position_tol:
         state.pos = onp.array(q_)
         if state.mom is not None:
             state.mom -= dh2_flow_mom_dmom @ onp.asarray(mu)

@@ -147,7 +147,7 @@ def add_chmc_experiment_args(parser, default_num_obs_per_subseq):
         help="Maximum number of iterations to try in projection solver",
     )
     parser.add_argument(
-        "--projection-solver-convergence-tol",
+        "--projection-solver-constraint-tol",
         type=float,
         default=1e-9,
         help="Tolerance for norm of constraint function in projection solver",
@@ -276,7 +276,7 @@ def setup_chmc_mici_objects(args, model, rng, obs_interval, y_seq, dim_u, genera
     )
 
     project_solver_kwargs = {
-        "convergence_tol": args.projection_solver_convergence_tol,
+        "constraint_tol": args.projection_solver_constraint_tol,
         "position_tol": args.projection_solver_position_tol,
         "max_iters": args.projection_solver_max_iters,
     }
