@@ -76,4 +76,4 @@ echo "--------------------------------------------------------------------------
 python ${SCRIPT_DIR}/fhn_model_noisy_obs_generate_plots.py \
   --experiment-dir ${EXPERIMENT_DIR} \
   --output-dir ${FIGURE_DIR} \
-  --obs-noise-std-grid ${OBS_NOISE_STD_GRID[@]} \
+  --obs-noise-std-grid ${OBS_NOISE_STD_GRID[@]}

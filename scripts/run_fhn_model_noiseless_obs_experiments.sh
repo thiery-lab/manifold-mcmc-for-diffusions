@@ -121,7 +121,9 @@ taskset -c 0 python ${SCRIPT_DIR}/fhn_model_noiseless_obs_chmc_operation_times.p
   --default-num-steps-per-obs ${DEFAULT_NUM_STEPS_PER_OBS} \
   --default-num-obs ${DEFAULT_NUM_OBS}
 
+echo "--------------------------------------------------------------------------------"
 echo "Generating plots"
+echo "--------------------------------------------------------------------------------"
 python ${SCRIPT_DIR}/fhn_model_noiseless_obs_generate_plots.py \
   --experiment-dir ${EXPERIMENT_DIR} \
   --output-dir ${FIGURE_DIR} \
