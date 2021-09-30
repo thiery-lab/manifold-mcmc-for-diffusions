@@ -71,7 +71,7 @@ system, integrator, sampler, adapters = setup_chmc_mici_objects(
     data["obs_interval"],
     data["y_seq"],
     dim_u,
-    sir.generate_σ if variable_σ else args.observation_noise_std,
+    sir.generate_σ_y if variable_σ else args.observation_noise_std,
 )
 
 
@@ -91,7 +91,7 @@ def trace_func(state):
         **call_counts,
     }
     if variable_σ:
-        traced_vars["σ"] = sir.generate_σ(u)
+        traced_vars["σ"] = sir.generate_σ_y(u)
     return traced_vars
 
 

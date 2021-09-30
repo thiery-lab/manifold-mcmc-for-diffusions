@@ -73,7 +73,7 @@ system, integrator, sampler, adapters = setup_hmc_mici_objects(
     data["obs_interval"],
     data["y_seq"],
     dim_u,
-    sir.generate_σ if variable_σ else args.observation_noise_std,
+    sir.generate_σ_y if variable_σ else args.observation_noise_std,
 )
 
 
@@ -93,7 +93,7 @@ def trace_func(state):
         **call_counts,
     }
     if variable_σ:
-        traced_vars["σ"] = sir.generate_σ(u)
+        traced_vars["σ"] = sir.generate_σ_y(u)
     return traced_vars
 
 
@@ -114,7 +114,7 @@ for c in range(args.num_chain):
         num_steps_per_obs=args.num_steps_per_obs,
         generate_z=sir.generate_z,
         generate_x_0=sir.generate_x_0,
-        generate_σ=sir.generate_σ
+        generate_σ=sir.generate_σ_y
         if variable_σ
         else lambda u: args.observation_noise_std,
         forward_func=sir.forward_func,
