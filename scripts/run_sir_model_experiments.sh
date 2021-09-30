@@ -5,7 +5,7 @@ trap "echo Stopping; exit;" SIGINT SIGTERM
 
 # Grid of observation noise standard deviations to run experiments for
 # -1 value indicates unknown observation noise standard deviation as variable to infer
-OBS_NOISE_STD_GRID=(0.3162 1 -1 3.162 10 -1)
+OBS_NOISE_STD_GRID=(0.3162 1 3.162 10 -1)
 
 # Number of independent chains to run per experiment
 NUM_CHAIN=4
