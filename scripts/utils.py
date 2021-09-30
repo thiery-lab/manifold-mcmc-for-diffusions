@@ -1,6 +1,5 @@
 """Shared helper functions for running experiments and generating plots."""
 
-import argparse
 from pathlib import Path
 import os
 import time
@@ -330,7 +329,7 @@ def sample_hmc_chains(
         adapters=adapters,
         memmap_enabled=True,
         memmap_path=output_dir,
-        monitor_stats=["accept_stat", "diverging", "n_step"],
+        monitor_stats=["accept_stat", "n_step"],
     )
     sampling_time = time.time() - start_time
     return final_states, traces, stats, sampling_time
@@ -359,8 +358,6 @@ def sample_chmc_chains(
         memmap_path=output_dir,
         monitor_stats=[
             ("integration", "accept_stat"),
-            ("integration", "convergence_error"),
-            ("integration", "non_reversible_step"),
             ("integration", "n_step"),
         ],
     )
