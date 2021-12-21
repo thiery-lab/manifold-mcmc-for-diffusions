@@ -174,7 +174,7 @@ if -1 in args.obs_noise_std_grid:
         _ = arviz.plot_pair(
             renamed_traces,
             ax=axes,
-            plot_kwargs={"ms": 0.5, "color": f"C{i}", "label": label},
+            scatter_kwargs={"ms": 0.5, "color": f"C{i}", "label": label},
         )
     handles, labels = axes[0, 0].get_legend_handles_labels()
     handles = [copy.copy(h) for h in handles]
