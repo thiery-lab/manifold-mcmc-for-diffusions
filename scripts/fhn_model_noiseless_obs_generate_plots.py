@@ -32,17 +32,6 @@ errorbar_kwargs = {"capsize": 2, "elinewidth": 1, "markeredgewidth": 1, "markers
 
 param_names = ["β", "γ", "σ", "ϵ"]
 
-func_names = [
-    "constr",
-    "jacob_constr_blocks",
-    "chol_gram_blocks",
-    "neg_log_dens",
-    "grad_neg_log_dens",
-    "log_det_sqrt_gram",
-    "grad_log_det_sqrt_gram",
-    "lu_jacob_product_blocks",
-]
-
 with open(
     os.path.join(
         args.experiment_dir, "fhn_noiseless_chmc", "fhn_noiseless_call_times.json"
@@ -86,18 +75,6 @@ exp_param_grids = {
         for num_obs in args.num_obs_grid
     ],
 }
-
-func_names = [
-    "constr",
-    "jacob_constr_blocks",
-    "chol_gram_blocks",
-    "neg_log_dens",
-    "grad_neg_log_dens",
-    "log_det_sqrt_gram",
-    "grad_log_det_sqrt_gram",
-    "lu_jacob_product_blocks",
-]
-
 
 summary_data = {}
 chain_stats_data = {}
