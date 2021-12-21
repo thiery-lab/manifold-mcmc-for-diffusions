@@ -4,6 +4,7 @@ from setuptools import setup, find_packages
 
 setup(
     name='sde',
+    version='0.1.0',
     description='Utilities for inference in SDE models using Mici',
     author='Matt Graham',
     url='https://github.com/thiery-lab/manifold-mcmc-for-diffusions.git',
