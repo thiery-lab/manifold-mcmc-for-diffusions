@@ -1,4 +1,6 @@
- # Manifold MCMC for diffusions
+ # Manifold MCMC methods for inference in diffusion models
+
+ [![DOI](https://zenodo.org/badge/225546103.svg)](https://zenodo.org/badge/latestdoi/225546103)
 
 Code accompanying the paper [*Manifold Markov chain Monte Carlo methods for Bayesian inference in a wide class of diffusion models*](https://arxiv.org/abs/1912.02982).
 
