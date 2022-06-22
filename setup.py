@@ -13,7 +13,7 @@ setup(
     install_requires=[
         'mici==0.1.10',
         'symnum==0.1.2',
-        'numpy==1.21',
+        'numpy==1.22.0',
         'sympy==1.8',
         'jax==0.2.21',
         'jaxlib==0.1.71'
