@@ -8,7 +8,7 @@ The manifold Markov chain Monte Carlo (MCMC) methods in [Mici](https://github.co
 
 ## Installation
 
-The `sde` package requires Python 3.7 or above. To install the `sde` package and its dependencies in the current Python environment run
+The `sde` package requires Python 3.11 or above. To install the `sde` package and its dependencies in the current Python environment run
 
 ```bash
 pip install git+https://github.com/thiery-lab/manifold-mcmc-for-diffusions.git
