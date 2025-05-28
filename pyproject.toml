@@ -1,0 +1,58 @@
+[build-system]
+build-backend = "setuptools.build_meta"
+requires = ["setuptools >= 77.0.3"]
+
+[project]
+name = "sde"
+version = "0.1.1"
+description = "Utilities for inference in SDE models using Mici"
+readme = "README.md"
+requires-python = ">=3.11"
+keywords = [
+    "stochastic differential equation",
+    "diffusion",
+    "Bayesian inference",
+    "Monte Carlo",
+    "Markov chain Monte Carlo",
+    "MCMC"
+]
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{name = "Matt Graham"}]
+classifiers = [
+  "Operating System :: OS Independent",
+  "Development Status :: 4 - Beta",
+  "Programming Language :: Python",
+  "Intended Audience :: Science/Research",
+  "Topic :: Scientific/Engineering",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3 :: Only",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+]
+dependencies = [
+  "mici~=0.3",
+  "symnum~=0.2",
+  "numpy~=2.2",
+  "sympy~=1.8",
+  "jax~=0.6"
+]
+
+[project.optional-dependencies]
+notebook = [
+  "matplotlib~=3.9",
+  "arviz~=0.21",
+  "corner~=2.2",
+  "jupyter~=1.1"
+]
+scripts = [
+  "matplotlib~=3.9",
+  "arviz~=0.21",
+  "pandas~=2.2",
+]
+
+[project.urls]
+repository = "https://github.com/thiery-lab/manifold-mcmc-for-diffusions.git"
+
+
