@@ -113,7 +113,7 @@ for c in range(args.num_chain):
     state = sde.mici_extensions.find_initial_state_by_linear_interpolation(
         system, rng, generate_x_obs_seq_init, u=u, v_0=v_0
     )
-    assert abs(system.constr(state)).max() < args.projection_solver_convergence_tol
+    assert abs(system.constr(state)).max() < args.projection_solver_constraint_tol
     init_states.append(state)
 
 
