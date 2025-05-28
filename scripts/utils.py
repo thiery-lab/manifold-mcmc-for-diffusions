@@ -9,7 +9,7 @@ import logging
 import pandas
 import numpy as np
 import matplotlib.pyplot as plt
-import jax.config
+import jax
 import arviz
 import sde
 import mici
@@ -321,13 +321,13 @@ def sample_hmc_chains(
     # Prevents warning messages being produced while progress bars are being printed
     np.seterr(over="ignore")
     start_time = time.time()
-    final_states, traces, stats = sampler.sample_chains_with_adaptive_warm_up(
+    final_states, traces, stats = sampler.sample_chains(
         num_warm_up_iter,
         num_main_iter,
         init_states,
         trace_funcs=[trace_func],
         adapters=adapters,
-        memmap_enabled=True,
+        force_memmap=True,
         memmap_path=output_dir,
         monitor_stats=["accept_stat", "n_step"],
     )
@@ -348,13 +348,13 @@ def sample_chmc_chains(
     # Prevents warning messages being produced while progress bars are being printed
     np.seterr(over="ignore")
     start_time = time.time()
-    final_states, traces, stats = sampler.sample_chains_with_adaptive_warm_up(
+    final_states, traces, stats = sampler.sample_chains(
         num_warm_up_iter,
         num_main_iter,
         init_states,
         trace_funcs=[trace_func],
         adapters={"integration": adapters},
-        memmap_enabled=True,
+        force_memmap=True,
         memmap_path=output_dir,
         monitor_stats=[
             ("integration", "accept_stat"),

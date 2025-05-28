@@ -10,12 +10,12 @@ import numpy as np
 from statistics import median
 from itertools import repeat, chain
 from sde.example_models import fhn
-from jax import jit, lax, numpy as jnp
+from jax import Array, jit, lax, numpy as jnp
 from utils import setup_jax, add_experiment_grid_args
 
 
 def block_until_ready_pytree(pytree):
-    if isinstance(pytree, jnp.DeviceArray):
+    if isinstance(pytree, Array):
         return pytree.block_until_ready()
     elif isinstance(pytree, (float, int, complex, bool, type(None))):
         return pytree

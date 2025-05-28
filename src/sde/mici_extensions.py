@@ -7,7 +7,7 @@ import jax.numpy as np
 import jax.numpy.linalg as nla
 import jax.scipy.linalg as sla
 from jax import lax
-import jax.experimental.optimizers as opt
+import jax.example_libraries.optimizers as opt
 from mici.systems import (
     System,
     cache_in_state,
@@ -45,7 +45,7 @@ def split_and_reshape(array, shapes):
     i = 0
     parts = []
     for s in shapes:
-        j = onp.product(s)
+        j = onp.prod(s)
         parts.append(array[i : i + j].reshape(s + array.shape[1:]))
         i += j
     if i < array.shape[0]:
@@ -65,7 +65,7 @@ def standard_normal_grad_neg_log_dens(q):
 
 def convert_to_numpy_pytree(jax_pytree):
     """Recursively convert 'pytree' of JAX arrays to NumPy arrays."""
-    if isinstance(jax_pytree, np.DeviceArray):
+    if isinstance(jax_pytree, jax.Array):
         return onp.asarray(jax_pytree)
     elif isinstance(jax_pytree, (float, int, complex, bool, type(None))):
         return jax_pytree
@@ -151,7 +151,7 @@ def conditioned_diffusion_neg_log_dens_and_grad(
             to define the leapfrog integrator for the Hamiltonian dynamics.
         return_jax_funcs (bool): Whether to return original JAX function (True) suitable
             for further JAX transformation or wrapped versions which output NumPy arrays
-            rather JAX `DeviceArray` instances.
+            rather JAX `Array` instances.
     """
 
     num_obs, dim_y = y_seq.shape
